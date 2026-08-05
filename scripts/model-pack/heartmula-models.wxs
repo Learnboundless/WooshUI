@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="Woosh Studio HeartMuLa Models"
+    Language="2052"
+    Version="$(var.Version)"
+    Manufacturer="Learnboundless"
+    UpgradeCode="16d3611c-b78f-56ed-832e-b62057818626">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 HeartMuLa 模型包。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="MODELROOT" Secure="yes">
+      <RegistrySearch
+        Id="SharedModelRootSearch"
+        Root="HKCU"
+        Key="Environment"
+        Name="WOOSH_MODEL_HOME"
+        Type="raw" />
+    </Property>
+    <Condition Message="请先设置用户环境变量 WOOSH_MODEL_HOME，并将它指向非 C 盘的共享模型目录。">
+      Installed OR MODELROOT
+    </Condition>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="CompanyFolder" Name="Learnboundless">
+          <Directory Id="INSTALLFOLDER" Name="Woosh Studio HeartMuLa Models">
+            <Component Id="CoreMarker" Guid="4d81aa73-9eac-5452-893e-15acfacd0702">
+              <File Id="CoreMarkerFile" Source="$(var.MarkerRoot)\core.txt" />
+              <File Id="InstallerScriptFile" Name="install.ps1" Source="$(var.InstallerScript)" />
+              <RegistryValue Root="HKCU" Key="Software\Learnboundless\Woosh Studio\HeartMuLa Models" Name="Core" Type="string" Value="$(var.Version)" KeyPath="yes" />
+              <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+              <RemoveFolder Id="RemoveCompanyFolder" Directory="CompanyFolder" On="uninstall" />
+            </Component>
+            <Component Id="MusicMarker" Guid="25d0a5fd-276b-5905-a4f8-b62680455294">
+              <File Id="MusicMarkerFile" Source="$(var.MarkerRoot)\heartmula.txt" />
+              <RegistryValue Root="HKCU" Key="Software\Learnboundless\Woosh Studio\HeartMuLa Models" Name="HeartMuLa" Type="string" Value="$(var.Version)" KeyPath="yes" />
+            </Component>
+            <Component Id="DemucsMarker" Guid="5f6681f2-a497-58b0-8574-36fdf010d691">
+              <File Id="DemucsMarkerFile" Source="$(var.MarkerRoot)\demucs.txt" />
+              <RegistryValue Root="HKCU" Key="Software\Learnboundless\Woosh Studio\HeartMuLa Models" Name="Demucs" Type="string" Value="$(var.Version)" KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Complete" Title="HeartMuLa 音乐模型包" Level="1" Display="expand">
+      <ComponentRef Id="CoreMarker" />
+      <Feature
+        Id="HeartMuLaFeature"
+        Title="HeartMuLa 3B + HeartCodec（约 22.4 GB）"
+        Description="生成纯音乐 BGM 与带歌词歌曲。Apache 2.0。"
+        Level="1"
+        Absent="allow">
+        <ComponentRef Id="MusicMarker" />
+      </Feature>
+      <Feature
+        Id="DemucsFeature"
+        Title="Demucs htdemucs 四分轨（约 81 MB）"
+        Description="将完整音乐后处理为人声、鼓、贝斯和其他。MIT。"
+        Level="1"
+        Absent="allow">
+        <ComponentRef Id="DemucsMarker" />
+      </Feature>
+    </Feature>
+
+    <CustomAction
+      Id="SetInstallMusicPayloadData"
+      Property="InstallMusicPayload"
+      Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -S &quot;[SourceDir]&quot; -M 3 -D 2"
+      Execute="immediate" />
+    <CustomAction
+      Id="InstallMusicPayload"
+      Directory="TARGETDIR"
+      ExeCommand="[CustomActionData]"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check" />
+    <CustomAction
+      Id="SetInstallDemucsPayloadData"
+      Property="InstallDemucsPayload"
+      Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -S &quot;[SourceDir]&quot; -M 2 -D 3"
+      Execute="immediate" />
+    <CustomAction
+      Id="InstallDemucsPayload"
+      Directory="TARGETDIR"
+      ExeCommand="[CustomActionData]"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="SetInstallMusicPayloadData" After="CostFinalize">NOT Installed AND &amp;HeartMuLaFeature=3</Custom>
+      <Custom Action="SetInstallDemucsPayloadData" After="SetInstallMusicPayloadData">NOT Installed AND &amp;DemucsFeature=3</Custom>
+      <Custom Action="InstallMusicPayload" After="InstallFiles">NOT Installed AND &amp;HeartMuLaFeature=3</Custom>
+      <Custom Action="InstallDemucsPayload" After="InstallMusicPayload">NOT Installed AND &amp;DemucsFeature=3</Custom>
+    </InstallExecuteSequence>
+
+    <UIRef Id="WixUI_FeatureTree" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+  </Product>
+</Wix>

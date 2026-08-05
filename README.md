@@ -16,6 +16,42 @@ dio unconditionally or from given a text prompt.
 - **V2A Generation (Woosh-VFlow)**: Multimodal LDM generating audio from a video sequence
 with optional text prompts.
 
+## Woosh Studio for Windows
+
+Woosh Studio is the local Tauri desktop workstation in this repository. It provides project-based text-to-sound generation, HeartMuLa music generation, Demucs four-stem separation, model management, CPU/CUDA selection, non-destructive effects, a lightweight multitrack timeline, and Wwise/FMOD export packages.
+
+The standard installer contains the application and a bundled `uv.exe`. On first launch, `uv` creates one controlled Python 3.12 CUDA environment for Woosh, HeartMuLa, and Demucs. The startup screen reports dependency resolution, downloads, installation, and startup progress.
+
+Set a shared model repository before running or packaging the application. The desktop launcher also reads this value directly from `HKCU\Environment`, so several local AI applications can reuse the same files:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "WOOSH_MODEL_HOME",
+  "E:\AIModels\WooshStudio",
+  "User"
+)
+```
+
+The model repository should be on a non-system drive with at least 30 GB free for HeartMuLa. Model downloads, `.part` files, Hugging Face caches, ModelScope caches, and Torch model caches are rooted there.
+
+Three Windows distributions can be produced:
+
+```powershell
+# Core MSI plus a selectable offline-model MSI distribution
+./scripts/build-installers.ps1
+
+# Independent selectable HeartMuLa/HeartCodec and Demucs model MSI/ZIP
+./scripts/build-heartmula-model-msi.ps1
+```
+
+The results are written to `.artifacts/installers/`:
+
+- `Woosh-Studio-0.2.0-no-models-x64.msi` contains no model weights.
+- `Woosh-Studio-0.2.0-with-models-x64.zip` contains a selectable Woosh DFlow/Flow model installer.
+- `Woosh-Studio-0.2.0-HeartMuLa-models-x64.zip` contains an independent MSI with optional HeartMuLa/HeartCodec and Demucs features. Its external payload is copied directly into `WOOSH_MODEL_HOME`; uninstalling an application does not remove shared weights.
+
+The offline build script validates official release file sizes, SHA-256 hashes, ZIP CRCs, archive paths, and checkpoint structure before packaging. The large model ZIPs remain external to the MSI database so the package does not exceed MSI/CAB size limits. Both variants use the same application identity, so install only the preferred variant. Portable sound projects remain independent of the application installation.
+
 ## Installation
 
 Start by installing [uv](https://docs.astral.sh/uv) first
@@ -29,13 +65,13 @@ and then the Woosh environment, with either:
 `cpu` support,
 
 ```bash
-uv sync --extra cpu
+uv sync --no-default-groups --group studio --group music --extra cpu
 ```
 
 or `cuda` support,
 
 ```bash
-uv sync --extra cuda
+uv sync --no-default-groups --group studio --group music --extra cuda
 ```
 
 ### Download model weights

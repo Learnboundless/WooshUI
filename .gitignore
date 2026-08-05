@@ -123,3 +123,24 @@ cython_debug/
 .DS_Store
 outputs/
 weights*.safetensors
+
+# Woosh Studio
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+desktop/node_modules/
+desktop/node_modules.incomplete/
+desktop/package-lock.incomplete.json
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/binaries/*.exe
+playwright-report/
+test-results/
+*.woosh-test/
+.artifacts/
+.uv-cache/
+.uv-tmp/
+api-dev.*.log
+ui-dev.*.log

@@ -1,0 +1,20 @@
+[package]
+name = "woosh-studio"
+version = "0.2.0"
+description = "Woosh Studio desktop sound-effect workstation"
+authors = ["Learnboundless"]
+edition = "2021"
+rust-version = "1.88"
+
+[lib]
+name = "woosh_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+uuid = { version = "1", features = ["v4"] }

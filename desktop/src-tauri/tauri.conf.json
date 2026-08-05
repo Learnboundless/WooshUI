@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Woosh Studio",
+  "version": "0.2.0",
+  "identifier": "com.learnboundless.wooshstudio",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../frontend run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm --prefix ../frontend run build",
+    "frontendDist": "../../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Woosh Studio",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "resizable": true,
+        "decorations": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:*; media-src 'self' http://127.0.0.1:* blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/uv"],
+    "resources": {
+      "../../pyproject.toml": "python/pyproject.toml",
+      "../../uv.lock": "python/uv.lock",
+      "../../README.md": "python/README.md",
+      "../../woosh": "python/woosh",
+      "../../woosh_studio": "python/woosh_studio",
+      "../../checkpoints": "python/checkpoints"
+    },
+    "windows": {
+      "wix": {
+        "language": "zh-CN",
+        "upgradeCode": "8714c540-4771-5203-9d35-c85718248314"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
