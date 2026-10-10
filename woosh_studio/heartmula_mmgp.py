@@ -91,6 +91,9 @@ def _configure_cuda_caches(model, device, dtype) -> None:
     import torch
 
     def setup_caches(self, max_batch_size: int) -> None:
+        cache_frames = int(
+            getattr(self, "_woosh_cache_frames", MAX_GENERATION_CACHE_FRAMES)
+        )
         try:
             self.reset_caches()
         except RuntimeError:
@@ -100,7 +103,7 @@ def _configure_cuda_caches(model, device, dtype) -> None:
                 self.backbone.setup_caches(
                     max_batch_size,
                     dtype,
-                    decoder_max_seq_len=MAX_GENERATION_CACHE_FRAMES,
+                    decoder_max_seq_len=cache_frames,
                 )
             if not self.decoder.caches_are_setup():
                 self.decoder.setup_caches(
@@ -116,8 +119,8 @@ def _configure_cuda_caches(model, device, dtype) -> None:
                     "backbone_causal_mask",
                     torch.tril(
                         torch.ones(
-                            MAX_GENERATION_CACHE_FRAMES,
-                            MAX_GENERATION_CACHE_FRAMES,
+                            cache_frames,
+                            cache_frames,
                             dtype=torch.bool,
                             device=device,
                         )
@@ -161,11 +164,11 @@ def _configure_staged_unload(pipeline, manager) -> None:
                 self._mula.backbone_causal_mask = None
                 self._mula.decoder_causal_mask = None
             manager.unload_all()
-            self._mula = None
+            # Keep CPU/offload-owned weights for the next generation.
             forward_complete = True
         else:
             manager.unload_all()
-            self._codec = None
+            forward_complete = False
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -207,6 +210,8 @@ def create_pipeline(model_root: Path, device, *, use_int8: bool):
 
     codec = _load_codec(codec_root)
 
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    budget_mb = max(1800, min(5800, int(free_bytes / 1024**2) - 1400))
     manager = offload.profile(
         {
             "transformer": mula,
@@ -214,9 +219,9 @@ def create_pipeline(model_root: Path, device, *, use_int8: bool):
         },
         profile_no=5,
         budgets={
-            "transformer": 2500,
-            "codec": 2500,
-            "*": 1500,
+            "transformer": budget_mb,
+            "codec": budget_mb,
+            "*": budget_mb,
         },
         verboseLevel=0,
         quantizeTransformer=use_int8,
@@ -233,6 +238,7 @@ def create_pipeline(model_root: Path, device, *, use_int8: bool):
         _configure_int8_muq_output(mula)
     _configure_cuda_caches(mula, device, torch.bfloat16)
     _configure_staged_unload(pipeline, manager)
+    pipeline._woosh_memory_budget_mb = budget_mb
     pipeline._mula = mula
     pipeline._codec = codec
     pipeline.mula_device = device

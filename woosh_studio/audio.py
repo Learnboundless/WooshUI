@@ -136,9 +136,9 @@ def time_stretch(audio: np.ndarray, rate: float) -> np.ndarray:
             window=window,
             return_complex=True,
         )
-        phase_advance = torch.linspace(
-            0, math.pi * hop_length, spectrogram.shape[-2]
-        )[..., None]
+        phase_advance = torch.linspace(0, math.pi * hop_length, spectrogram.shape[-2])[
+            ..., None
+        ]
         stretched = torchaudio.functional.phase_vocoder(
             spectrogram, rate=rate, phase_advance=phase_advance
         )
@@ -258,7 +258,9 @@ class AudioRenderService:
     def preview(self, request: RenderRequest) -> Path:
         root = Path(request.project_path).expanduser().resolve()
         cache_key = hashlib.sha256(
-            json.dumps(request.timeline.model_dump(mode="json"), sort_keys=True).encode()
+            json.dumps(
+                request.timeline.model_dump(mode="json"), sort_keys=True
+            ).encode()
         ).hexdigest()[:20]
         target = root / ".cache" / f"preview-{cache_key}.wav"
         if not target.exists():
@@ -272,6 +274,56 @@ class AudioRenderService:
         audio = self.render_timeline(root, request.timeline)
         sf.write(target, audio.T, request.timeline.sample_rate, subtype="PCM_24")
         return target
+
+    def protect_asset(self, asset_id: str, project_path: str):
+        from .signal_analysis import protect_peak
+        from uuid import uuid4
+
+        root = Path(project_path).expanduser().resolve()
+        manifest = self.projects.open(root)
+        source_asset = next(
+            (asset for asset in manifest.assets if asset.id == asset_id), None
+        )
+        if source_asset is None:
+            raise ValueError("素材不存在")
+        source = self.projects.resolve_project_file(root, source_asset.relative_path)
+        audio, sr = sf.read(source, always_2d=True, dtype="float32")
+        output, stats = protect_peak(audio)
+        if stats["gain"] >= 1:
+            raise ValueError("当前峰值正常，无需处理")
+        directory = root / "Generated" / "Processed"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = self.projects._unique_path(
+            directory, safe_name(source_asset.name + "_峰值保护") + ".wav"
+        )
+        sf.write(target, output, sr, subtype="PCM_24")
+        asset = GeneratedAsset(
+            name=target.stem,
+            relative_path=target.relative_to(root).as_posix(),
+            source="rendered",
+            kind=source_asset.kind
+            if source_asset.kind in {"sfx", "music_mix", "voice_line"}
+            else "render",
+            model_id=source_asset.model_id,
+            seed=source_asset.seed,
+            sample_rate=sr,
+            channel_count=output.shape[1],
+            duration_seconds=len(output) / sr,
+            generation_group_id=str(uuid4())
+            if source_asset.kind == "music_mix"
+            else source_asset.generation_group_id,
+            parent_asset_id=source_asset.id,
+            prompt_original=source_asset.prompt_original,
+            prompt_conditioned=source_asset.prompt_conditioned,
+            music_metadata={
+                **(source_asset.music_metadata or {}),
+                "edit_operation": "peak_protection",
+                "peak_protection": stats,
+            },
+            tags=list(dict.fromkeys([*source_asset.tags, "峰值保护"])),
+        )
+        saved = self.projects.mutate(root, lambda latest: latest.assets.append(asset))
+        return {"manifest": saved, "asset": asset}
 
     def trim_asset(
         self, asset_id: str, request: AssetTrimRequest
@@ -324,6 +376,14 @@ class AudioRenderService:
             relative_path=target.relative_to(root).as_posix(),
             source="rendered",
             kind="render",
+            music_metadata={
+                **(source_asset.music_metadata or {}),
+                "sfx_family": source_asset.kind == "sfx"
+                or bool((source_asset.music_metadata or {}).get("sfx_family")),
+                "edit_operation": "trim",
+                "trim_start_seconds": start_sample / sample_rate,
+                "trim_end_seconds": end_sample / sample_rate,
+            },
             prompt_original=source_asset.prompt_original,
             prompt_conditioned=source_asset.prompt_conditioned,
             model_id=source_asset.model_id,

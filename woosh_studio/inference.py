@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import random
+import time
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
@@ -31,7 +32,10 @@ class InferenceService:
         system: SystemService,
         database: LibraryDatabase,
         inference_lock: RLock | None = None,
+        runtime=None,
     ):
+        self.runtime = runtime
+        self._loaded_revision = None
         self.models = models
         self.projects = projects
         self.system = system
@@ -59,12 +63,71 @@ class InferenceService:
 
     def generation_worker(self, request: GenerationRequest):
         def worker(job_id: str, update, control: JobControl) -> dict[str, Any]:
-            with self._lock:
+            from .model_runtime import model_revision
+
+            device = self.system.capabilities().effective_device
+            revision = (
+                model_revision(self.models.model_path(request.settings.model_id))
+                + model_revision(self.models.dependency_path("Woosh-AE"))
+                + model_revision(self.models.dependency_path("TextConditionerA"))
+            )
+            lease = (
+                self.runtime.lease(
+                    (request.settings.model_id, revision, device),
+                    request.settings.model_id,
+                    control,
+                    self.unload,
+                )
+                if self.runtime
+                else self._lock
+            )
+            with lease:
                 root = Path(request.project_path).expanduser().resolve()
                 manifest = self.projects.open(root)
-                update(status=JobStatus.LOADING, stage="加载模型", progress=0.03)
+                from .sfx import automatic_sound_name, is_sfx_asset
+
+                name = (
+                    automatic_sound_name(
+                        request.prompt_original or request.prompt_conditioned
+                    )
+                    if request.name_mode == "auto"
+                    else request.name
+                )
+                original = None
+                if request.variant_of_asset_id:
+                    by_id = {asset.id: asset for asset in manifest.assets}
+                    original = by_id.get(request.variant_of_asset_id)
+                    if not original or not is_sfx_asset(original, by_id):
+                        raise ValueError("只能为现有音效继续生成变体")
+                    seen = set()
+                    while original.parent_asset_id in by_id and original.id not in seen:
+                        seen.add(original.id)
+                        original = by_id[original.parent_asset_id]
+                batch_id = (
+                    (original.generation_group_id or original.id)
+                    if original
+                    else job_id
+                )
+                family_id = original.id if original else None
+                reused = (
+                    self._model is not None
+                    and self._model_id == request.settings.model_id
+                    and self._device == device
+                    and self._loaded_revision == revision
+                )
+                if not reused and self._model is not None:
+                    self.unload()
+                update(
+                    status=JobStatus.RUNNING if reused else JobStatus.LOADING,
+                    stage="复用已加载模型" if reused else "加载模型",
+                    progress=0.03,
+                )
+                started = time.monotonic()
                 device = self.system.capabilities().effective_device
                 model = self._load_model(request.settings.model_id, device)
+                self._loaded_revision = revision
+                if self.runtime and not reused:
+                    self.runtime.mark_loaded(time.monotonic() - started)
                 seeds = self._seeds(request)
                 assets: list[GeneratedAsset] = []
                 for index, seed in enumerate(seeds):
@@ -74,6 +137,8 @@ class InferenceService:
                         stage=f"生成变体 {index + 1}/{len(seeds)}",
                         progress=0.08 + (index / len(seeds)) * 0.78,
                     )
+                    if self.runtime:
+                        self.runtime.mark_running()
                     audio = self._generate_one(
                         model=model,
                         model_id=request.settings.model_id,
@@ -97,7 +162,7 @@ class InferenceService:
                     filename = self._unique_generated_name(
                         root,
                         request.category,
-                        request.name,
+                        name,
                         index + 1,
                     )
                     relative_path = Path("Generated") / filename
@@ -114,16 +179,29 @@ class InferenceService:
                         prompt_conditioned=request.prompt_conditioned,
                         model_id=request.settings.model_id,
                         seed=seed,
+                        generation_group_id=batch_id,
+                        parent_asset_id=family_id,
+                        music_metadata={
+                            "source_job_id": job_id,
+                            "sound_name": name,
+                            "variant_index": index + 1,
+                            "name_mode": request.name_mode,
+                            "settings": request.settings.model_dump(mode="json"),
+                        },
                         duration_seconds=len(audio) / SAMPLE_RATE,
                         tags=["已去首尾静音"] if trimmed else [],
                     )
+                    if family_id is None:
+                        family_id = asset.id
                     assets.append(asset)
-                    manifest.assets.append(asset)
-                self.projects.save(root, manifest)
+                    self.projects.mutate(
+                        root, lambda manifest: manifest.assets.append(asset)
+                    )
                 update(status=JobStatus.RENDERING, stage="写入项目", progress=0.94)
                 return {
                     "project_path": str(root),
                     "asset_ids": [asset.id for asset in assets],
+                    "generation_group_id": batch_id,
                 }
 
         return worker
@@ -131,7 +209,11 @@ class InferenceService:
     def _load_model(self, model_id: str, device: str):
         if not self.models.is_installed(model_id):
             raise RuntimeError(f"模型尚未安装: {model_id}")
-        if self._model is not None and self._model_id == model_id and self._device == device:
+        if (
+            self._model is not None
+            and self._model_id == model_id
+            and self._device == device
+        ):
             return self._model
         self.unload()
         from woosh.components.base import LoadConfig
@@ -179,9 +261,9 @@ class InferenceService:
         import torch
 
         generator = torch.Generator(device="cpu").manual_seed(seed)
-        noise = torch.randn(
-            1, LATENT_CHANNELS, LATENT_FRAMES, generator=generator
-        ).to(device)
+        noise = torch.randn(1, LATENT_CHANNELS, LATENT_FRAMES, generator=generator).to(
+            device
+        )
         condition = model.get_cond(
             {"audio": None, "description": [prompt]},
             no_dropout=True,
@@ -220,12 +302,18 @@ class InferenceService:
     @staticmethod
     def _seeds(request: GenerationRequest) -> list[int]:
         settings = request.settings
-        base = settings.seed if settings.seed is not None else random.SystemRandom().randint(0, 2**31 - 1)
+        base = (
+            settings.seed
+            if settings.seed is not None
+            else random.SystemRandom().randint(0, 2**31 - 1)
+        )
         if settings.seed_mode == "fixed":
             return [base] * request.count
         if settings.seed_mode == "increment":
             return [base + index for index in range(request.count)]
-        return [random.SystemRandom().randint(0, 2**31 - 1) for _ in range(request.count)]
+        return [
+            random.SystemRandom().randint(0, 2**31 - 1) for _ in range(request.count)
+        ]
 
     @staticmethod
     def _unique_generated_name(
@@ -244,9 +332,14 @@ class TranslationService:
     def __init__(self, models: ModelService):
         self.models = models
         self._translator = None
+        self._translation_revision = None
         self._source_tokenizer = None
         self._target_tokenizer = None
         self._lock = Lock()
+
+    def unload(self):
+        with self._lock:
+            self._translator = self._source_tokenizer = self._target_tokenizer = None
 
     def translate(self, text: str) -> str:
         text = text.strip()
@@ -255,8 +348,11 @@ class TranslationService:
         path = self.models.translation_path()
         if not self.models._translation_valid(path):
             raise RuntimeError("本地翻译模型尚未准备完成")
+        from .model_runtime import model_revision
+
+        revision = model_revision(path)
         with self._lock:
-            if self._translator is None:
+            if self._translator is None or self._translation_revision != revision:
                 import ctranslate2
                 import sentencepiece as spm
 
@@ -269,6 +365,7 @@ class TranslationService:
                 self._target_tokenizer = spm.SentencePieceProcessor(
                     model_file=str(path / "target.spm")
                 )
+                self._translation_revision = revision
             source_tokens = self._source_tokenizer.encode(text, out_type=str)
             source_tokens.append("</s>")
             result = self._translator.translate_batch(

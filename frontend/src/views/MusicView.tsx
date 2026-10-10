@@ -1,16 +1,14 @@
 import {
   Disc3,
-  Download,
   FileUp,
   ListMusic,
   ListPlus,
   Music2,
-  Play,
   Scissors,
   Sparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, audioUrl } from "../api";
+import { api } from "../api";
 import type {
   Clip,
   GeneratedAsset,
@@ -18,6 +16,11 @@ import type {
   ProjectManifest,
   Track,
 } from "../types";
+
+import { AudioVisualization } from "../components/AudioVisualization";
+import { AudioPreview } from "../components/AudioPreview";
+import { AssetActions } from "../components/AssetActions";
+import { useAssetHealth } from "../hooks/useAssetHealth";
 
 interface MusicViewProps {
   projectPath: string;
@@ -49,13 +52,15 @@ export function MusicView({
   onQueued,
   onError,
 }: MusicViewProps) {
+  const { missingIds, refresh, error: healthError } = useAssetHealth(projectPath, project);
+  const [submitting, setSubmitting] = useState(false);
   const [title, setTitle] = useState("Battle Theme");
   const [mode, setMode] = useState<MusicMode>("instrumental");
-  const [tagsText, setTagsText] = useState("cinematic, electronic, tense, 120 bpm");
+  const [tagsText, setTagsText] = useState("cinematic, orchestral, instrumental, 120 bpm");
   const [lyrics, setLyrics] = useState("[Intro]\n\n[Verse]\n\n[Chorus]\n");
-  const [duration, setDuration] = useState<30 | 60 | 120 | 240>(60);
+  const [duration, setDuration] = useState<30 | 60 | 120 | 240>(30);
   const [count, setCount] = useState(1);
-  const [separateStems, setSeparateStems] = useState(true);
+  const [separateStems, setSeparateStems] = useState(false);
   const [temperature, setTemperature] = useState(1);
   const [topK, setTopK] = useState(50);
   const [cfgScale, setCfgScale] = useState(1.5);
@@ -104,30 +109,33 @@ export function MusicView({
     if (!tags.includes(tag)) setTagsText([...tags, tag].join(", "));
   }
 
-  async function generate() {
+  async function generate(preview=false) {
+    if (submitting) return;
     if (!musicModel?.installed) {
       onError("请先在模型页面安装 HeartMuLa 与 HeartCodec");
       return;
     }
-    if (separateStems && !demucs?.installed) {
+    if (!preview && separateStems && !demucs?.installed) {
       onError("生成后分轨已开启，请先安装 Demucs 四分轨工具");
       return;
     }
     try {
+      setSubmitting(true);
       await api.generateMusic({
         project_path: projectPath,
         title,
         mode,
         tags: parseTags(tagsText),
         lyrics: mode === "lyrics" ? lyrics : "",
-        duration_seconds: duration,
-        count,
-        separate_stems: separateStems,
+        duration_seconds: preview ? 10 : duration,
+        count: preview ? 1 : count,
+        separate_stems: preview ? false : separateStems,
         settings: {
           model_id: "HeartMuLa-3B",
           temperature,
           top_k: topK,
-          cfg_scale: cfgScale,
+          performance_mode: preview ? "preview" : "standard",
+          cfg_scale: preview ? 1 : cfgScale,
           seed,
           seed_mode: seedMode,
         },
@@ -135,7 +143,7 @@ export function MusicView({
       onQueued();
     } catch (error) {
       onError(error instanceof Error ? error.message : "音乐任务提交失败");
-    }
+    } finally { setSubmitting(false); }
   }
 
   async function separate(assetId: string) {
@@ -195,8 +203,8 @@ export function MusicView({
       <section className="content-pane music-pane">
         <header className="view-header">
           <div><span className="eyebrow">TEXT TO MUSIC</span><h1>生成音乐</h1></div>
-          <button className="primary-button" onClick={generate} disabled={!title.trim()}>
-            <Sparkles size={17} />生成 {count} 个变体
+          <button className="secondary-button" disabled={submitting} onClick={()=>void generate(true)}><Sparkles size={16}/>10 秒快速预览</button><button className="primary-button" onClick={()=>void generate()} disabled={submitting || !title.trim()}>
+            <Sparkles size={17} />{submitting ? "提交中…" : `生成 ${count} 个变体`}
           </button>
         </header>
 
@@ -210,6 +218,7 @@ export function MusicView({
 
         <div className="music-editor">
           <div className="tag-editor">
+            {parseTags(tagsText).includes("electronic") && <div className="music-style-note"><span>当前包含电子风格标签，可能产生明显的合成器音色。</span><button className="text-button" onClick={()=>setTagsText("orchestral, acoustic, cinematic, instrumental, 120 bpm")}>切换为管弦 / 原声配乐</button></div>}
             <label><span>风格标签</span><input value={tagsText} onChange={(event) => setTagsText(event.target.value)} placeholder="风格, 情绪, 速度, 乐器" /></label>
             <div className="tag-presets">{tagPresets.map((tag) => <button key={tag} onClick={() => addTag(tag)}>+ {tag}</button>)}</div>
           </div>
@@ -229,6 +238,7 @@ export function MusicView({
         </div>
 
         <div className="section-heading"><div><h2>音乐素材组</h2><span>{groups.length} 组</span></div></div>
+        {healthError && <p className="line-issue">文件状态检查失败：{healthError}</p>}
         <div className="music-results">
           {groups.length === 0 ? (
             <div className="empty-state music-empty"><ListMusic size={28} /><strong>还没有音乐</strong><span>音乐混音与后处理分轨会成组显示。</span></div>
@@ -236,16 +246,16 @@ export function MusicView({
             const mix = assets.find((asset) => asset.kind === "music_mix");
             const stems = assets.filter((asset) => asset.kind === "stem");
             return <article className="music-group" key={groupId}>
-              <header><div><strong>{mix?.name || "音乐素材"}</strong><span>{formatDuration(mix?.duration_seconds || 0)} · {mix?.seed ?? "—"}</span></div><button className="secondary-button compact-button" onClick={() => void addAssetsToTimeline(assets)}><ListPlus size={15} />{stems.length ? "加入四轨" : "加入混音"}</button></header>
-              {mix && <MusicAssetRow asset={mix} projectPath={projectPath} onAdd={() => void addAssetsToTimeline([mix])} />}
-              {stems.length > 0 ? <div className="stem-grid">{stems.map((asset) => <MusicAssetRow asset={asset} projectPath={projectPath} key={asset.id} compact onAdd={() => void addAssetsToTimeline([asset])} />)}</div> : mix && <button className="text-button separate-button" onClick={() => void separate(mix.id)}><Scissors size={15} />生成后分离人声、鼓、贝斯、其他</button>}
+              <header><div><strong>{mix?.name || "音乐素材"}{mix?.music_metadata?.performance_mode === "preview" && <small className="music-preview-badge">快速预览</small>}</strong><span>{formatDuration(mix?.duration_seconds || 0)} · {mix?.seed ?? "—"}</span></div><button className="secondary-button compact-button" disabled={assets.some((asset) => missingIds.has(asset.id))} onClick={() => void addAssetsToTimeline(assets)}><ListPlus size={15} />{stems.length ? "加入四轨" : "加入混音"}</button></header>
+              {mix && <><AudioVisualization projectPath={projectPath} path={mix.relative_path} label={mix.name} missing={missingIds.has(mix.id)}/><button className="text-button" disabled={missingIds.has(mix.id)} onClick={()=>void api.protectAudio(projectPath,mix.id).then(result=>onProjectChange(result.manifest)).catch(error=>onError(String(error.message || error)))}>创建峰值保护版本</button></>}{mix && <MusicAssetRow asset={mix} projectPath={projectPath} missing={missingIds.has(mix.id)} onProjectChange={onProjectChange} onError={onError} onMissing={() => void refresh()} onAdd={() => void addAssetsToTimeline([mix])} />}
+              {stems.length > 0 ? <div className="stem-grid">{stems.map((asset) => <MusicAssetRow asset={asset} projectPath={projectPath} missing={missingIds.has(asset.id)} onProjectChange={onProjectChange} onError={onError} onMissing={() => void refresh()} key={asset.id} compact onAdd={() => void addAssetsToTimeline([asset])} />)}</div> : mix && <button className="text-button separate-button" disabled={missingIds.has(mix.id)} onClick={() => void separate(mix.id)}><Scissors size={15} />生成后分离人声、鼓、贝斯、其他</button>}
             </article>;
           })}
         </div>
       </section>
 
       <aside className="inspector-pane">
-        <div className="inspector-header"><h2>音乐参数</h2><span className={musicModel?.installed ? "status-dot ready" : "status-dot"}>{musicModel?.installed ? "可用" : "未安装"}</span></div>
+        <p className="field-hint">先做 10 秒快速预览，再生成正式版本。分轨可在满意后单独执行。</p><div className="inspector-header"><h2>音乐参数</h2><span className={musicModel?.installed ? "status-dot ready" : "status-dot"}>{musicModel?.installed ? "可用" : "未安装"}</span></div>
         <fieldset className="field"><legend>最大时长</legend><div className="segmented duration-segment">{([30, 60, 120, 240] as const).map((value) => <button className={duration === value ? "active" : ""} key={value} onClick={() => setDuration(value)}>{value < 60 ? `${value}s` : `${value / 60}m`}</button>)}</div></fieldset>
         <label className="field"><span>变体数量 <output>{count}</output></span><input type="range" min="1" max="4" value={count} onChange={(event) => setCount(Number(event.target.value))} /></label>
         <label className="toggle-row stem-toggle"><span><strong>生成后分轨</strong><small>Demucs 后处理 · 4 stems</small></span><input type="checkbox" checked={separateStems} onChange={(event) => setSeparateStems(event.target.checked)} /></label>
@@ -260,21 +270,8 @@ export function MusicView({
   );
 }
 
-function MusicAssetRow({ asset, projectPath, compact = false, onAdd }: { asset: GeneratedAsset; projectPath: string; compact?: boolean; onAdd: () => void }) {
-  const source = audioUrl(projectPath, asset.relative_path);
-  return <div className={compact ? "music-asset compact" : "music-asset"}>
-    <span className="music-kind">{asset.stem_role ? roleLabels[asset.stem_role] : "MIX"}</span>
-    <button className="icon-button small" title="播放" onClick={(event) => {
-      const audio = event.currentTarget.parentElement?.querySelector("audio");
-      if (!audio) return;
-      if (audio.paused) void audio.play();
-      else audio.pause();
-    }}><Play size={14} fill="currentColor" /></button>
-    <span><strong>{asset.name}</strong><small>{asset.channel_count} ch · 48 kHz</small></span>
-    <audio preload="none" src={source} />
-    <button className="icon-button small" title="单独加入工作台" onClick={onAdd}><ListPlus size={14} /></button>
-    <a className="icon-button small" title="下载 WAV" href={source} download={`${asset.name}.wav`}><Download size={14} /></a>
-  </div>;
+function MusicAssetRow({ asset, projectPath, compact = false, onAdd, missing, onError, onProjectChange, onMissing }: { asset: GeneratedAsset; projectPath: string; compact?: boolean; onAdd: () => void; missing?: boolean; onError: (message: string) => void; onProjectChange: (project: ProjectManifest) => void; onMissing: () => void }) {
+  return <div className={`music-audio-asset ${compact ? "compact" : ""} ${missing ? "asset-missing" : ""}`}><header><span className="music-kind">{asset.stem_role ? roleLabels[asset.stem_role] : "MIX"}</span><strong>{asset.name}</strong><button className="icon-button small" title="单独加入工作台" disabled={missing} onClick={onAdd}><ListPlus size={14} /></button><AssetActions asset={asset} projectPath={projectPath} missing={missing} onProjectChange={onProjectChange} onError={onError} /></header><AudioPreview projectPath={projectPath} path={asset.relative_path} label={asset.name} missing={missing} onError={onError} onMissing={onMissing} /></div>;
 }
 
 function parseTags(value: string): string[] {

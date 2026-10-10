@@ -26,9 +26,20 @@ New-Item -ItemType Directory -Force -Path $artifacts, $distribution, $temporary 
 $env:TEMP = $temporary
 $env:TMP = $temporary
 
+& (Join-Path $PSScriptRoot "prepare-bundled-translation.ps1")
+if ($LASTEXITCODE -ne 0) { throw "Bundled translation preparation failed" }
+
 $wixDirectory = Join-Path $tauri "target\release\wix\x64"
 $coreOutput = Join-Path $artifacts "Woosh-Studio-$version-no-models-x64.msi"
+& (Join-Path $PSScriptRoot "build-offline-runtime.ps1") -Version $version
+if ($LASTEXITCODE -ne 0) {
+    throw "Offline runtime build failed"
+}
 if ($ReuseAppBuild) {
+    $savedWxs = Join-Path $wixDirectory "main.wxs"
+    if (-not (Test-Path -LiteralPath $savedWxs) -or -not (Select-String -LiteralPath $savedWxs -SimpleMatch "M2M100-418M-int8.zip" -Quiet)) {
+        throw "Saved MSI build has no bundled translation; rerun without -ReuseAppBuild."
+    }
     & (Join-Path $PSScriptRoot "relink-core-msi.ps1") `
         -SourceWxs (Join-Path $wixDirectory "main.wxs") `
         -LocaleWxl (Join-Path $wixDirectory "locale.wxl") `

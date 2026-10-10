@@ -2,17 +2,19 @@ import {
   Copy,
   Heart,
   Languages,
-  ListPlus,
   Play,
   RotateCcw,
   Scissors,
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { api, audioUrl } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { api } from "../api";
 import { ContextMenu } from "../components/ContextMenu";
-import { Waveform, type WaveformHandle } from "../components/Waveform";
+import { AudioPreview } from "../components/AudioPreview";
+import { SfxBatchGrid } from "../components/SfxBatchGrid";
+import { automaticSoundName,sfxFamilies,sfxDisplayName } from "../sfx";
+import { useAssetHealth } from "../hooks/useAssetHealth";
 import type { GeneratedAsset, ModelDescriptor, ProjectManifest } from "../types";
 
 interface GenerateViewProps {
@@ -36,6 +38,8 @@ export function GenerateView({
   onQueued,
   onError,
 }: GenerateViewProps) {
+  const [autoName,setAutoName]=useState(true);
+  const [analysisRevision,setAnalysisRevision]=useState(0);
   const [soundName, setSoundName] = useState("机甲落地");
   const [promptOriginal, setPromptOriginal] = useState("重型机甲落地，金属冲击与短促液压声");
   const [promptConditioned, setPromptConditioned] = useState("a heavy mech landing with a metallic impact and a short hydraulic burst");
@@ -51,9 +55,10 @@ export function GenerateView({
   const [translationStage, setTranslationStage] = useState<"idle" | "preparing" | "translating">("idle");
   const [selectedAssetId, setSelectedAssetId] = useState(project.assets.at(-1)?.id ?? "");
   const [contextMenu, setContextMenu] = useState<{ assetId: string; x: number; y: number } | null>(null);
-  const waveformRef = useRef<WaveformHandle>(null);
+  const { missingIds, refresh, error: healthError } = useAssetHealth(projectPath, project);
+  const [auditionRequest, setAuditionRequest] = useState(0);
   const soundAssets = useMemo(
-    () => project.assets.filter((asset) => !["music_mix", "stem"].includes(asset.kind)),
+    () => sfxFamilies(project.assets).flatMap(family=>family.versions),
     [project.assets],
   );
   const selectedAsset = useMemo(
@@ -65,7 +70,8 @@ export function GenerateView({
     : undefined;
   const textModels = models.filter((model) => model.family === "text" && model.supported);
   const activeDescriptor = textModels.find((model) => model.id === activeModel);
-  const translationModel = models.find((model) => model.family === "translation");
+  const translationModel = models.find((model) => model.id === "opus-mt-zh-en");
+  const builtinTranslation = models.find((model) => model.id === "m2m100-418M-int8");
 
   useEffect(() => {
     setTrimStart(0);
@@ -73,9 +79,9 @@ export function GenerateView({
   }, [selectedAsset?.id, selectedAsset?.duration_seconds]);
 
   async function translate() {
-    setTranslationStage(translationModel?.installed ? "translating" : "preparing");
+    setTranslationStage(translationModel?.installed || builtinTranslation?.installed ? "translating" : "preparing");
     try {
-      if (!translationModel?.installed) {
+      if (!translationModel?.installed && !builtinTranslation?.installed && !builtinTranslation?.bundled) {
         const job = await api.downloadModel(translationModel?.id || "opus-mt-zh-en");
         onQueued();
         await waitForJob(job.id);
@@ -101,8 +107,8 @@ export function GenerateView({
     }
   }
 
-  async function generate() {
-    const normalizedName = soundName.trim();
+  async function generate(variantOf?:GeneratedAsset) {
+    const normalizedName = variantOf ? sfxDisplayName(variantOf) : autoName ? automaticSoundName(promptOriginal || promptConditioned) : soundName.trim();
     if (!normalizedName) {
       onError("请先填写音效名称");
       return;
@@ -114,8 +120,10 @@ export function GenerateView({
     try {
       await api.generate({
         project_path: projectPath,
-        prompt_original: promptOriginal,
-        prompt_conditioned: promptConditioned,
+        prompt_original: variantOf?.prompt_original || promptOriginal,
+        prompt_conditioned: variantOf?.prompt_conditioned || promptConditioned,
+        name_mode: variantOf || !autoName ? "manual" : "auto",
+        variant_of_asset_id: variantOf?.id || null,
         count,
         category: "SFX",
         name: normalizedName,
@@ -123,13 +131,14 @@ export function GenerateView({
         settings: {
           model_id: activeModel,
           cfg,
-          seed,
+          seed: variantOf && seedMode === "increment" ? Math.max(seed, ...((sfxFamilies(project.assets).find(family=>family.versions.some(item=>item.id===variantOf.id))?.versions || []).map(item=>item.seed ?? seed))) + 1 : seed,
           seed_mode: seedMode,
           solver: "dopri5",
           atol: 0.001,
           rtol: 0.001,
         },
       });
+      setSelectedAssetId("");
       onQueued();
     } catch (error) {
       onError(error instanceof Error ? error.message : "生成任务提交失败");
@@ -177,14 +186,10 @@ export function GenerateView({
     setContextMenu({ assetId: asset.id, x, y });
   }
 
-  function openKeyboardContextMenu(asset: GeneratedAsset, target: HTMLElement) {
-    const bounds = target.getBoundingClientRect();
-    openContextMenu(asset, bounds.left + 20, bounds.top + 20);
-  }
 
   function auditionAsset(asset: GeneratedAsset) {
     setSelectedAssetId(asset.id);
-    window.setTimeout(() => waveformRef.current?.togglePlayback(), 0);
+    setAuditionRequest((value) => value + 1);
   }
 
   return (
@@ -192,7 +197,7 @@ export function GenerateView({
       <section className="content-pane generate-pane">
         <header className="view-header">
           <div><span className="eyebrow">TEXT TO AUDIO</span><h1>生成音效</h1></div>
-          <button className="primary-button" onClick={generate} disabled={!soundName.trim() || !promptConditioned.trim()}>
+          <button className="primary-button" onClick={()=>void generate()} disabled={(!autoName && !soundName.trim()) || !promptConditioned.trim()}>
             <Sparkles size={17} />生成 {count} 个变体
           </button>
         </header>
@@ -204,11 +209,11 @@ export function GenerateView({
               aria-label="音效名称"
               maxLength={80}
               placeholder="例如：玩家激光枪"
-              value={soundName}
-              onChange={(event) => setSoundName(event.target.value)}
+              value={autoName ? automaticSoundName(promptOriginal || promptConditioned) : soundName}
+              onChange={(event) => {setAutoName(false);setSoundName(event.target.value)}}
             />
           </label>
-          <span className="sfx-name-preview">SFX_{safePreviewName(soundName)}_01.wav</span>
+          <label className="auto-name-toggle"><input type="checkbox" checked={autoName} onChange={event=>{if(!event.target.checked)setSoundName(automaticSoundName(promptOriginal || promptConditioned));setAutoName(event.target.checked)}}/>根据提示词自动命名</label><span className="sfx-name-preview">SFX_{safePreviewName(autoName ? automaticSoundName(promptOriginal || promptConditioned) : soundName)}_01.wav</span>
         </div>
 
         <div className="prompt-editor">
@@ -225,52 +230,20 @@ export function GenerateView({
           </div>
         </div>
 
-        <div className="section-heading"><div><h2>生成版本</h2><span>{soundAssets.length} 个素材</span></div><button className="icon-button" title="刷新项目"><RotateCcw size={16} /></button></div>
-        <div className="asset-grid">
-          {soundAssets.length === 0 ? (
-            <div className="empty-state"><AudioEmptyIcon /><strong>还没有音效</strong><span>提交提示词后，生成版本会出现在这里。</span></div>
-          ) : soundAssets.slice().reverse().map((asset) => (
-            <article
-              className={selectedAsset?.id === asset.id ? "asset-card selected" : "asset-card"}
-              key={asset.id}
-              tabIndex={0}
-              aria-label={`素材 ${asset.name}`}
-              onClick={() => setSelectedAssetId(asset.id)}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                openContextMenu(asset, event.clientX, event.clientY);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setSelectedAssetId(asset.id);
-                } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-                  event.preventDefault();
-                  openKeyboardContextMenu(asset, event.currentTarget);
-                }
-              }}
-            >
-              <div className="asset-card__top"><span className="asset-index">{asset.source === "generated" ? "AI" : "SRC"}</span><button className={asset.favorite ? "icon-button small favorite" : "icon-button small"} title="收藏" onClick={(event) => { event.stopPropagation(); void toggleFavorite(asset.id); }}><Heart size={15} fill={asset.favorite ? "currentColor" : "none"} /></button></div>
-              <strong>{asset.name}</strong>
-              <span className="asset-meta">{asset.model_id || "导入素材"} · {asset.seed ?? "—"}</span>
-              <div className="mini-wave"><span /><span /><span /><span /><span /><span /><span /></div>
-            </article>
-          ))}
-        </div>
+        <div className="section-heading"><div><h2>音效批次</h2><span>{sfxFamilies(project.assets).length} 组音效 · {soundAssets.length} 个版本</span></div><button className="icon-button" title="刷新项目" onClick={() => {setAnalysisRevision(value=>value+1);void api.openProject(projectPath).then(onProjectChange).then(refresh).catch((reason) => onError(reason.message))}}><RotateCcw size={16} /></button></div>
+        {healthError && <p className="line-issue">文件状态检查失败：{healthError}</p>}
+        {soundAssets.some(asset=>missingIds.has(asset.id)) && <p className="workbench-warning">{soundAssets.filter(asset=>missingIds.has(asset.id)).length} 个音效文件缺失，可重新关联或删除项目记录。</p>}
+        <SfxBatchGrid assets={project.assets} selectedId={selectedAsset?.id} projectPath={projectPath} missingIds={missingIds} revision={analysisRevision} onSelect={asset=>setSelectedAssetId(asset.id)} onPlay={auditionAsset} onFavorite={id=>void toggleFavorite(id)} onContext={openContextMenu} onMore={asset=>void generate(asset)} onProjectChange={onProjectChange} onError={onError}/>
 
         {selectedAsset && (
-          <div className="audition-strip">
-            <button className="transport-button" title="播放或暂停" onClick={() => waveformRef.current?.togglePlayback()}><Play size={18} fill="currentColor" /></button>
-            <div className="audition-wave"><Waveform ref={waveformRef} url={audioUrl(projectPath, selectedAsset.relative_path)} height={54} /></div>
-            <div className="audition-actions"><button className="icon-button" title="复制参数"><Copy size={16} /></button><button className="icon-button" title="加入工作台"><ListPlus size={16} /></button></div>
-          </div>
+          <div className="audition-strip"><AudioPreview key={`${selectedAsset.id}:${auditionRequest}`} projectPath={projectPath} path={selectedAsset.relative_path} label={selectedAsset.name} autoPlay={auditionRequest > 0} missing={missingIds.has(selectedAsset.id)} onError={onError} onMissing={() => void refresh()} /></div>
         )}
       </section>
 
       <aside className="inspector-pane">
         <div className="inspector-header"><h2>生成参数</h2><span className={activeDescriptor?.installed ? "status-dot ready" : "status-dot"}>{activeDescriptor?.installed ? "可用" : "未安装"}</span></div>
         <label className="field"><span>模型</span><select value={activeModel} onChange={(event) => onModelChange(event.target.value)}>{textModels.map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
-        <label className="field"><span>变体数量 <output>{count}</output></span><input type="range" min="1" max="8" value={count} onChange={(event) => setCount(Number(event.target.value))} /></label>
+        <label className="field"><span>变体数量 <output>{count}</output></span><input aria-label="音效变体数量" type="range" min="1" max="8" value={count} onChange={(event) => setCount(Number(event.target.value))} /></label>
         <label className="field"><span>引导强度 <output>{cfg.toFixed(1)}</output></span><input type="range" min="0" max="15" step="0.1" value={cfg} onChange={(event) => setCfg(Number(event.target.value))} /></label>
         <fieldset className="field"><legend>生成后处理</legend><div className="segmented two-line"><button className={postprocessMode === "none" ? "active" : ""} onClick={() => setPostprocessMode("none")}>保留完整</button><button className={postprocessMode === "trim_silence" ? "active" : ""} onClick={() => setPostprocessMode("trim_silence")}>自动去空白</button></div><small className="field-hint">只裁首尾静音，不处理声音中间的停顿。</small></fieldset>
         <fieldset className="field"><legend>种子策略</legend><div className="segmented"><button className={seedMode === "random" ? "active" : ""} onClick={() => setSeedMode("random")}>随机</button><button className={seedMode === "fixed" ? "active" : ""} onClick={() => setSeedMode("fixed")}>固定</button><button className={seedMode === "increment" ? "active" : ""} onClick={() => setSeedMode("increment")}>递增</button></div></fieldset>
@@ -280,7 +253,7 @@ export function GenerateView({
           <div className="subsection-heading"><span>素材裁剪</span><small>{selectedAsset.duration_seconds.toFixed(2)} 秒</small></div>
           <fieldset className="field"><legend>处理方式</legend><div className="segmented two-line"><button className={assetTrimMode === "trim_silence" ? "active" : ""} onClick={() => setAssetTrimMode("trim_silence")}>自动去空白</button><button className={assetTrimMode === "manual" ? "active" : ""} onClick={() => setAssetTrimMode("manual")}>手动范围</button></div></fieldset>
           {assetTrimMode === "manual" && <div className="two-fields"><label className="field"><span>起点（秒）</span><input aria-label="裁剪起点" type="number" min="0" max={selectedAsset.duration_seconds} step="0.01" value={trimStart} onChange={(event) => setTrimStart(Number(event.target.value))} /></label><label className="field"><span>终点（秒）</span><input aria-label="裁剪终点" type="number" min="0" max={selectedAsset.duration_seconds} step="0.01" value={trimEnd} onChange={(event) => setTrimEnd(Number(event.target.value))} /></label></div>}
-          <button className="secondary-button full-width-button" onClick={() => void createTrimmedVersion()} disabled={processingAsset || (assetTrimMode === "manual" && trimEnd <= trimStart)}><Scissors size={15} />{processingAsset ? "处理中" : "创建裁剪版本"}</button>
+          <button className="secondary-button full-width-button" onClick={() => void createTrimmedVersion()} disabled={missingIds.has(selectedAsset.id) || processingAsset || (assetTrimMode === "manual" && trimEnd <= trimStart)}><Scissors size={15} />{processingAsset ? "处理中" : "创建裁剪版本"}</button>
           <small className="field-hint block-hint">创建新素材，不覆盖当前 WAV。</small>
         </>}
         <div className="inspector-divider" />
@@ -296,6 +269,7 @@ export function GenerateView({
             {
               id: "audition",
               label: "试听",
+              disabled: missingIds.has(menuAsset.id),
               icon: <Play size={15} />,
               onSelect: () => auditionAsset(menuAsset),
             },
@@ -303,7 +277,7 @@ export function GenerateView({
               id: "auto-trim",
               label: "自动去首尾空白",
               icon: <Scissors size={15} />,
-              disabled: processingAsset,
+              disabled: processingAsset || missingIds.has(menuAsset.id),
               onSelect: () => createTrimmedVersion(menuAsset, "trim_silence"),
             },
             {
@@ -327,10 +301,6 @@ export function GenerateView({
       )}
     </div>
   );
-}
-
-function AudioEmptyIcon() {
-  return <div className="empty-wave" aria-hidden="true"><span /><span /><span /><span /><span /></div>;
 }
 
 function safePreviewName(value: string) {

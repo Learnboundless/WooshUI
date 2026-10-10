@@ -205,3 +205,26 @@ def test_download_retries_network_errors_and_resumes_partial_file(
 
     assert attempts == 2
     assert destination.read_bytes() == payload
+
+
+def test_asr_install_uses_one_pinned_revision_and_registers_local_files(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import huggingface_hub
+    from woosh_studio.models import WHISPER_MODEL_ID
+    paths = StudioPaths(tmp_path / "app").ensure()
+    service = ModelService(paths, LibraryDatabase(paths.database))
+    monkeypatch.delenv("WOOSH_STUDIO_OFFLINE", raising=False)
+    names = ["config.json", "preprocessor_config.json", "tokenizer.json", "model.safetensors"]
+    info = SimpleNamespace(sha="pinned-revision", siblings=[SimpleNamespace(rfilename=name,size=2,lfs=None) for name in names])
+    monkeypatch.setattr(huggingface_hub,"HfApi",lambda: SimpleNamespace(model_info=lambda *args,**kwargs:info))
+    requested = []
+    def download(url, destination, control, on_progress, expected_size=None):
+        requested.append(url)
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        destination.write_bytes(b"{}")
+        on_progress(1,0)
+    monkeypatch.setattr(service,"_download_file",download)
+    result=service.download_worker(WHISPER_MODEL_ID)("asr-download",lambda **kwargs:None,JobControl())
+    assert service.is_installed(WHISPER_MODEL_ID)
+    assert all("/resolve/pinned-revision/" in url for url in requested)
+    assert (Path(result["path"]) / "woosh-model-revision.json").is_file()

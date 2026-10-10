@@ -28,6 +28,7 @@ class JobStatus(str, Enum):
     RUNNING = "running"
     RENDERING = "rendering"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
@@ -36,6 +37,9 @@ class JobStatus(str, Enum):
 class JobKind(str, Enum):
     GENERATION = "generation"
     MUSIC_GENERATION = "music_generation"
+    SPEECH_GENERATION = "speech_generation"
+    TRANSCRIPTION = "transcription"
+    MODEL_PRELOAD = "model_preload"
     STEM_SEPARATION = "stem_separation"
     MODEL_DOWNLOAD = "model_download"
     RENDER = "render"
@@ -86,19 +90,22 @@ class ModelDependency(StrictModel):
 class ModelDescriptor(StrictModel):
     id: str
     name: str
-    family: Literal["text", "video", "translation", "music", "separation"]
+    family: Literal[
+        "text", "video", "translation", "music", "speech", "separation", "transcription"
+    ]
     description: str
     release: str = "v1.0.0"
     license: str
     license_url: str
     installed: bool = False
     custom: bool = False
+    bundled: bool = False
     path: str | None = None
     dependencies: list[ModelDependency] = Field(default_factory=list)
     controls: list[str] = Field(default_factory=list)
     supported: bool = True
     engine: Literal[
-        "woosh", "heartmula", "demucs", "transformers", "ctranslate2"
+        "woosh", "heartmula", "demucs", "qwen_tts", "transformers", "ctranslate2"
     ] = "woosh"
     model_source: Literal["github", "modelscope", "huggingface", "local"] = "github"
     memory_mode: Literal["standard", "auto_low_vram", "cpu"] = "standard"
@@ -120,6 +127,19 @@ class RuntimeSettings(StrictModel):
     music_memory_mode: Literal["auto", "bf16", "int8"] = "auto"
     language: Literal["zh-CN", "en"] = "zh-CN"
     theme: Literal["system", "light", "dark"] = "system"
+    model_residency: Literal["idle", "keep", "release"] = "idle"
+    model_idle_seconds: int = Field(default=600, ge=30, le=86400)
+    freesound_api_key: str | None = None
+
+
+class RuntimeStatus(StrictModel):
+    offline: bool = False
+    source: Literal["bundled", "managed"] = "managed"
+    ready: bool = True
+    version: str | None = None
+    heartmula_ready: bool = False
+    heartcodec_ready: bool = False
+    demucs_ready: bool = False
 
 
 class PathRequest(StrictModel):
@@ -139,6 +159,8 @@ class CustomModelRequest(StrictModel):
 
 class TranslationRequest(StrictModel):
     text: str
+    source_language: str = "Chinese"
+    target_language: str = "English"
 
 
 class SystemCapabilities(StrictModel):
@@ -151,6 +173,7 @@ class SystemCapabilities(StrictModel):
     disk_free_bytes: int
     model_root: str
     settings: RuntimeSettings
+    runtime: RuntimeStatus = Field(default_factory=RuntimeStatus)
 
 
 class EffectType(str, Enum):
@@ -224,6 +247,8 @@ class GenerationRequest(StrictModel):
     prompt_conditioned: str
     count: Annotated[int, Field(ge=1, le=8)] = 1
     category: str = "SFX"
+    name_mode: Literal["auto", "manual"] = "manual"
+    variant_of_asset_id: str | None = None
     name: str = "generated"
     postprocess_mode: Literal["none", "trim_silence"] = "none"
     settings: GenerationSettings = Field(default_factory=GenerationSettings)
@@ -238,8 +263,14 @@ class GenerationRequest(StrictModel):
 
     @field_validator("category", "name")
     @classmethod
-    def validate_generation_name(cls, value: str) -> str:
+    def validate_generation_name(cls, value: str, info) -> str:
         value = value.strip()
+        if (
+            not value
+            and info.field_name == "name"
+            and info.data.get("name_mode") == "auto"
+        ):
+            return value
         if not value:
             raise ValueError("音效名称不能为空")
         return value
@@ -250,7 +281,9 @@ class GeneratedAsset(StrictModel):
     name: str
     relative_path: str
     source: Literal["generated", "imported", "rendered"] = "generated"
-    kind: Literal["sfx", "music_mix", "stem", "imported", "render"] = "sfx"
+    kind: Literal["sfx", "music_mix", "stem", "voice_line", "imported", "render"] = (
+        "sfx"
+    )
     prompt_original: str | None = None
     prompt_conditioned: str | None = None
     model_id: str | None = None
@@ -272,6 +305,120 @@ class ExportPreset(StrictModel):
     package: Literal["files", "wwise_fmod"] = "files"
     naming_template: str = "{category}_{name}_{variant:02}"
     category: str = "SFX"
+
+
+class VoiceSettings(StrictModel):
+    mode: Literal["custom_voice", "clone"] = "custom_voice"
+    speaker: str | None = "Vivian"
+    instruct: str = ""
+    reference_audio: str | None = None
+    reference_text: str = ""
+
+
+class VoiceProfile(VoiceSettings):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    name: str
+    language: str = "Chinese"
+    locale_overrides: dict[str, VoiceSettings] = Field(default_factory=dict)
+
+    @field_validator("locale_overrides")
+    @classmethod
+    def validate_overrides(cls, value):
+        from .languages import validate_locales
+
+        validate_locales(value)
+        return value
+
+
+class LocalizedLine(StrictModel):
+    text: str = ""
+    spoken_text: str = ""
+    source_text: str = ""
+    source_language: str = ""
+    source_revision: int = 1
+    model_id: str = "manual"
+    locked: bool = False
+    review_status: Literal["draft", "approved", "stale"] = "draft"
+    asset_id: str | None = None
+    input_fingerprint: str | None = None
+
+
+class GlossaryEntry(StrictModel):
+    source: str = Field(min_length=1)
+    translations: dict[str, str] = Field(default_factory=dict)
+    note: str = ""
+
+
+class DialogueTranslation(StrictModel):
+    source_text: str
+    source_language: str
+    target_language: str
+    text: str
+    model_id: str
+
+
+class ScriptLine(StrictModel):
+    key: str = ""
+    scene_id: str = ""
+    context: str = ""
+    source_revision: int = 1
+    localizations: dict[str, LocalizedLine] = Field(default_factory=dict)
+
+    @field_validator("localizations")
+    @classmethod
+    def validate_localizations(cls, value):
+        from .languages import validate_locales
+
+        validate_locales(value)
+        return value
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    character: str
+    text: str
+    source_language: str = "Auto"
+    translation: DialogueTranslation | None = None
+    voice_id: str | None = None
+    language: str = "Chinese"
+    instruct: str = ""
+    enabled: bool = True
+    asset_id: str | None = None
+
+
+class ScriptDocument(StrictModel):
+    title: str = "项目剧本"
+    source_locale: str = "zh-CN"
+    target_locales: list[str] = Field(default_factory=list)
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+
+    @field_validator("target_locales")
+    @classmethod
+    def validate_targets(cls, value):
+        from .languages import validate_locales
+
+        return validate_locales(value)
+
+    @field_validator("source_locale")
+    @classmethod
+    def validate_source(cls, value):
+        from .languages import validate_locales
+
+        return validate_locales([value])[0]
+
+    @model_validator(mode="after")
+    def unique_ids(self):
+        for values in (
+            [line.id for line in self.lines],
+            [voice.id for voice in self.voices],
+            [line.key for line in self.lines if line.key],
+        ):
+            if any(not value.strip() for value in values) or len(set(values)) != len(
+                values
+            ):
+                raise ValueError("台词、角色 ID 或台词 key 为空或重复")
+        return self
+
+    voices: list[VoiceProfile] = Field(default_factory=list)
+    lines: list[ScriptLine] = Field(default_factory=list)
 
 
 class ProjectManifestV1(StrictModel):
@@ -299,6 +446,11 @@ class ProjectManifestV2(StrictModel):
     assets: list[GeneratedAsset] = Field(default_factory=list)
     timeline: Timeline = Field(default_factory=Timeline)
     export_preset: ExportPreset = Field(default_factory=ExportPreset)
+    script: ScriptDocument = Field(default_factory=ScriptDocument)
+
+
+class ProjectManifestV3(ProjectManifestV2):
+    schema_version: Literal[3] = 3
 
 
 class CreateProjectRequest(StrictModel):
@@ -309,7 +461,7 @@ class CreateProjectRequest(StrictModel):
 
 class SaveProjectRequest(StrictModel):
     project_path: str
-    manifest: ProjectManifestV2
+    manifest: ProjectManifestV3 | ProjectManifestV2
 
 
 class ImportAssetRequest(StrictModel):
@@ -331,6 +483,7 @@ class ExportRequest(StrictModel):
 
 
 class MusicGenerationSettings(StrictModel):
+    performance_mode: Literal["standard", "preview"] = "standard"
     model_id: Literal["HeartMuLa-3B"] = "HeartMuLa-3B"
     temperature: Annotated[float, Field(ge=0.1, le=2)] = 1.0
     top_k: Annotated[int, Field(ge=1, le=200)] = 50
@@ -345,9 +498,9 @@ class MusicGenerationRequest(StrictModel):
     mode: Literal["instrumental", "lyrics"] = "instrumental"
     tags: list[str] = Field(default_factory=list, max_length=24)
     lyrics: str = ""
-    duration_seconds: Literal[30, 60, 120, 240] = 60
+    duration_seconds: Literal[10, 15, 30, 60, 120, 240] = 30
     count: Annotated[int, Field(ge=1, le=4)] = 1
-    separate_stems: bool = True
+    separate_stems: bool = False
     settings: MusicGenerationSettings = Field(default_factory=MusicGenerationSettings)
 
     @field_validator("title")
@@ -373,6 +526,22 @@ class MusicGenerationRequest(StrictModel):
         return value
 
 
+class SpeechGenerationRequest(StrictModel):
+    project_path: str
+    line_ids: list[str] = Field(default_factory=list)
+    continue_on_error: bool = True
+    target_locales: list[str] = Field(default_factory=list)
+    force: bool = False
+    text_only: bool = False
+
+    @field_validator("target_locales")
+    @classmethod
+    def validate_targets(cls, value):
+        from .languages import validate_locales
+
+        return validate_locales(value)
+
+
 class SeparateAssetRequest(StrictModel):
     project_path: str
 
@@ -394,3 +563,80 @@ class AssetTrimRequest(StrictModel):
             if self.end_seconds <= self.start_seconds:
                 raise ValueError("结束时间必须晚于开始时间")
         return self
+
+
+class ScriptPreviewRequest(StrictModel):
+    text: str
+
+
+class ResourceImportRequest(StrictModel):
+    project_path: str
+    paths: list[str] = Field(min_length=1, max_length=200)
+
+
+class ResourceResolveRequest(StrictModel):
+    project_path: str
+    paths: list[str] = Field(max_length=200)
+
+
+class SaveScriptRequest(StrictModel):
+    project_path: str
+    script: ScriptDocument
+
+
+class AssetDeleteRequest(StrictModel):
+    project_path: str
+    asset_ids: list[str] = Field(min_length=1, max_length=2000)
+
+
+class AssetRelinkRequest(StrictModel):
+    project_path: str
+    source_path: str
+
+
+class FreesoundSearchRequest(StrictModel):
+    query: str = Field(min_length=1, max_length=120)
+    page: int = Field(default=1, ge=1, le=1000)
+    page_size: int = Field(default=20, ge=1, le=50)
+    filter: str | None = Field(default=None, max_length=300)
+
+
+class FreesoundImportRequest(StrictModel):
+    project_path: str
+    sound_id: int = Field(ge=1)
+    preview_url: str
+    name: str = Field(min_length=1, max_length=160)
+    username: str = Field(default="", max_length=80)
+    license: str = Field(default="", max_length=120)
+    sound_url: str
+    duration: float = Field(default=0, ge=0)
+
+
+class TranscriptionRequest(StrictModel):
+    project_path: str
+    reference_audio: str
+    language: str = "Auto"
+
+
+class LocalizationExportRequest(StrictModel):
+    project_path: str
+    target_locales: list[str] = Field(default_factory=list)
+    mode: Literal["text", "complete"] = "complete"
+    require_approved: bool = False
+    format: Literal["wav24", "wav16", "flac", "ogg"] = "wav24"
+
+    @field_validator("target_locales")
+    @classmethod
+    def validate_targets(cls, value):
+        from .languages import validate_locales
+
+        return validate_locales(value)
+
+
+class AudioAnalysisRequest(StrictModel):
+    project_path: str
+    relative_path: str
+
+
+class AudioProtectionRequest(StrictModel):
+    project_path: str

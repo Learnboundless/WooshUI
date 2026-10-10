@@ -1,6 +1,7 @@
-import { CircleAlert, FolderOpen, Sparkles, X } from "lucide-react";
+import { BookOpen, CircleAlert, FolderOpen, Sparkles, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getBackendStatus, type BackendStatus } from "./api";
+import { AgentKitDialog } from "./components/AgentKitDialog";
 import { JobBar } from "./components/JobBar";
 import { ProjectModal } from "./components/ProjectModal";
 import { Sidebar } from "./components/Sidebar";
@@ -10,9 +11,11 @@ import { GenerateView } from "./views/GenerateView";
 import { MusicView } from "./views/MusicView";
 import { ModelsView } from "./views/ModelsView";
 import { SettingsView } from "./views/SettingsView";
+import { SpeechView } from "./views/SpeechView";
 import { StudioView } from "./views/StudioView";
 
 export function App() {
+  const [agentKit, setAgentKit] = useState(false);
   const [view, setView] = useState<ViewId>("generate");
   const [capabilities, setCapabilities] = useState<SystemCapabilities | null>(null);
   const [models, setModels] = useState<ModelDescriptor[]>([]);
@@ -25,6 +28,8 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [backendStatus, setBackendStatus] = useState<BackendStatus>({ phase: "starting", message: "正在启动本地音频服务", detail: "正在检查运行环境", progress: 0.02, first_setup: false, elapsed_seconds: 0 });
   const handledJobs = useRef(new Set<string>());
+
+  const updateSpeechProject = useCallback((updated: ProjectManifest) => setProject((current) => current?.id === updated.id ? updated : current), []);
 
   const refreshModels = useCallback(async () => setModels(await api.models()), []);
   const refreshRecent = useCallback(async () => setRecent(await api.recentProjects()), []);
@@ -69,9 +74,9 @@ export function App() {
       void api.jobs().then((jobList) => {
         setJobs(jobList);
         for (const job of jobList) {
-          if (job.status !== "completed" || handledJobs.current.has(job.id)) continue;
+          if (!["completed", "partial", "failed", "cancelled", "interrupted"].includes(job.status) || handledJobs.current.has(job.id)) continue;
           handledJobs.current.add(job.id);
-          if (["generation", "music_generation", "stem_separation"].includes(job.kind)) void refreshProject();
+          if (["generation", "music_generation", "speech_generation", "stem_separation"].includes(job.kind)) void refreshProject();
           if (job.kind === "model_download") void refreshModels();
         }
       }).catch(() => undefined);
@@ -178,10 +183,11 @@ export function App() {
       onError={setError}
     />
     <main className="main-shell">
-      <div className="app-toolbar"><div className="breadcrumb"><span>Woosh Studio</span><i>/</i><strong>{project?.name || "项目"}</strong></div><div className="runtime-pill"><span className={capabilities?.effective_device === "cuda" ? "runtime-indicator cuda" : "runtime-indicator"} />{capabilities?.effective_device.toUpperCase()}<small>{capabilities?.cuda_device_name || "本地运行"}</small></div></div>
-      {!project && ["generate", "music", "studio", "exports"].includes(view) ? <ProjectWelcome onNew={() => setProjectModal(true)} onOpen={() => void openProject()} /> : project && capabilities ? <>
+      <div className="app-toolbar"><div className="breadcrumb"><span>Woosh Studio</span><i>/</i><strong>{project?.name || "项目"}</strong></div><div className="toolbar-right"><button className="text-button" onClick={() => setAgentKit(true)}><BookOpen size={14} />AI 工作流</button><div className="runtime-pill"><span className={capabilities?.effective_device === "cuda" ? "runtime-indicator cuda" : "runtime-indicator"} />{capabilities?.effective_device.toUpperCase()}<small>{capabilities?.cuda_device_name || "本地运行"}</small></div></div></div>
+      {!project && ["generate", "music", "speech", "studio", "exports"].includes(view) ? <ProjectWelcome onNew={() => setProjectModal(true)} onOpen={() => void openProject()} /> : project && capabilities ? <>
         {view === "generate" && <GenerateView projectPath={projectPath} project={project} models={models} activeModel={capabilities.settings.active_model} onModelChange={(id) => void updateSettings({ ...capabilities.settings, active_model: id })} onProjectChange={setProject} onQueued={() => void api.jobs().then(setJobs)} onError={setError} />}
         {view === "music" && <MusicView projectPath={projectPath} project={project} models={models} onProjectChange={setProject} onQueued={() => void api.jobs().then(setJobs)} onError={setError} />}
+        <div className="speech-host" hidden={view !== "speech"}><SpeechView key={projectPath} active={view === "speech"} projectPath={projectPath} project={project} models={models} jobs={jobs} onProjectChange={updateSpeechProject} onQueued={() => void api.jobs().then(setJobs)} onError={setError} /></div>
         {view === "studio" && <StudioView projectPath={projectPath} project={project} onProjectChange={setProject} onError={setError} />}
         {view === "exports" && <ExportsView projectPath={projectPath} project={project} onQueued={() => void api.jobs().then(setJobs)} onError={setError} />}
       </> : null}
@@ -189,6 +195,7 @@ export function App() {
       {view === "settings" && capabilities && <SettingsView capabilities={capabilities} onChange={(settings) => void updateSettings(settings)} />}
       <JobBar jobs={jobs} onCancel={(id) => void api.cancelJob(id).then(() => api.jobs()).then(setJobs).catch((reason) => setError(reason.message))} />
     </main>
+    {agentKit && <AgentKitDialog onClose={() => setAgentKit(false)} />}
     <ProjectModal open={projectModal} defaultDirectory={recent[0]?.path.replace(/[\\/][^\\/]+$/, "") || "C:\\Users\\Public\\Documents"} onClose={() => setProjectModal(false)} onCreate={createProject} onPickDirectory={pickDirectory} />
     {error && <div className="toast error" role="alert"><CircleAlert size={17} /><span>{error}</span><button className="icon-button small" title="关闭" onClick={() => setError("")}><X size={15} /></button></div>}
   </div>;

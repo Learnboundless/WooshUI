@@ -15,6 +15,9 @@ import {
 } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { api, audioUrl } from "../api";
+import { AudioPreview } from "../components/AudioPreview";
+import { AssetActions } from "../components/AssetActions";
+import { useAssetHealth } from "../hooks/useAssetHealth";
 import { ContextMenu } from "../components/ContextMenu";
 import type { Clip, EffectNode, EffectNode as Effect, GeneratedAsset, ProjectManifest, Track } from "../types";
 
@@ -36,6 +39,8 @@ const effectNames: Record<Effect["type"], string> = {
 };
 
 export function StudioView({ projectPath, project, onProjectChange, onError }: StudioViewProps) {
+  const { missingIds, missingPaths, refresh, error: healthError } = useAssetHealth(projectPath, project);
+  const [selectedAssetId, setSelectedAssetId] = useState("");
   const [selectedClipId, setSelectedClipId] = useState("");
   const [previewPath, setPreviewPath] = useState("");
   const [rendering, setRendering] = useState(false);
@@ -79,6 +84,7 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
   }
 
   function addAsset(asset: GeneratedAsset, trackId?: string, startSeconds = 0) {
+    if (missingIds.has(asset.id)) { onError("文件缺失，请先重新关联素材"); return; }
     const clip: Clip = {
       id: crypto.randomUUID(), asset_id: asset.id, name: asset.name, source_path: asset.relative_path,
       start_seconds: startSeconds, trim_start_seconds: 0, trim_end_seconds: null, fade_in_seconds: 0.02,
@@ -123,6 +129,7 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
   }
 
   async function preview() {
+    if (project.timeline.tracks.some((track) => track.clips.some((clip) => missingPaths.has(clip.source_path)))) { onError("时间线中有缺失音频，请重新关联素材或删除缺失片段后再渲染"); return; }
     setRendering(true);
     try {
       const result = await api.renderPreview(projectPath, project.timeline);
@@ -194,6 +201,8 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
           <span>{project.timeline.duration_seconds.toFixed(1)} s</span>
           {previewRelative && <audio id="mix-preview" src={audioUrl(projectPath, previewRelative)} />}
         </div>
+        {healthError && <p className="line-issue">文件检查失败：{healthError}</p>}
+        {missingIds.size > 0 && <div className="workbench-warning">{missingIds.size} 个素材文件缺失。选择素材后可以重新关联或删除。<button className="text-button" onClick={() => void refresh()}>重新检查</button></div>}
         <div className="timeline-shell">
           <div className="timeline-ruler" style={{ width: 180 + Math.max(720, project.timeline.duration_seconds * pixelsPerSecond) }}><span className="track-label-spacer" />{timelineTicks(project.timeline.duration_seconds, pixelsPerSecond).map((seconds) => <span key={seconds} style={{ left: 180 + seconds * pixelsPerSecond }}>{formatRulerTime(seconds)}</span>)}</div>
           <div className="timeline-scroll" ref={timelineRef}>
@@ -207,11 +216,11 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
                 const bounds = event.currentTarget.querySelector(".track-lane")?.getBoundingClientRect();
                 addAsset(asset, track.id, bounds ? Math.max(0, (event.clientX - bounds.left) / pixelsPerSecond) : 0);
               }}>
-                <div className="track-controls"><GripVertical size={15} className="muted" /><span className={`track-role role-${track.role}`}>{track.role === "generic" ? "AUDIO" : track.role.toUpperCase()}</span><input value={track.name} onChange={(event) => updateTrack(track.id, { name: event.target.value })} /><button className={track.muted ? "track-toggle active" : "track-toggle"} title="静音" onClick={() => updateTrack(track.id, { muted: !track.muted })}>M</button><button className={track.solo ? "track-toggle active solo" : "track-toggle"} title="独奏" onClick={() => updateTrack(track.id, { solo: !track.solo })}>S</button></div>
+                <div className="track-controls"><GripVertical size={15} className="muted" /><span className={`track-role role-${track.role}`}>{track.role === "generic" ? "AUDIO" : track.role.toUpperCase()}</span><input value={track.name} onChange={(event) => updateTrack(track.id, { name: event.target.value })} /><button className={track.muted ? "track-toggle active" : "track-toggle"} title="静音" onClick={() => updateTrack(track.id, { muted: !track.muted })}>M</button><button className={track.solo ? "track-toggle active solo" : "track-toggle"} title="独奏" onClick={() => updateTrack(track.id, { solo: !track.solo })}>S</button><button className="icon-button small" title={`删除轨道 ${track.name}`} onClick={() => void commit(project.timeline.tracks.filter((item) => item.id !== track.id))}><Trash2 size={13} /></button></div>
                 <div className="track-lane" style={{ width: Math.max(720, project.timeline.duration_seconds * pixelsPerSecond), backgroundSize: `${pixelsPerSecond}px 100%` }}>
                   {track.clips.map((clip) => (
                     <button
-                      className={selectedClipId === clip.id ? "timeline-clip selected" : "timeline-clip"}
+                      className={`timeline-clip ${selectedClipId === clip.id ? "selected" : ""} ${missingPaths.has(clip.source_path) ? "asset-missing" : ""}`}
                       key={clip.id}
                       style={{ left: clip.start_seconds * pixelsPerSecond, width: Math.max(48, clipDuration(clip, project.assets) * pixelsPerSecond) }}
                       onClick={() => setSelectedClipId(clip.id)}
@@ -228,7 +237,7 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
                         }
                       }}
                     >
-                      <span>{clip.name}</span><div className="clip-wave"><i /><i /><i /><i /><i /><i /><i /><i /></div>
+                      <span>{missingPaths.has(clip.source_path) ? "⚠ 文件缺失 · " : ""}{clip.name}</span><div className="clip-wave"><i /><i /><i /><i /><i /><i /><i /><i /></div>
                     </button>
                   ))}
                 </div>
@@ -239,7 +248,9 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
         <div className="asset-tray">
           <div className="section-heading compact"><div><h2>项目素材</h2><span>拖入轨道</span></div></div>
           <div className="asset-tray__items">{project.assets.map((asset) => <button
-            draggable
+            draggable={!missingIds.has(asset.id)}
+            className={missingIds.has(asset.id) ? "asset-missing" : ""}
+            onClick={() => setSelectedAssetId(asset.id)}
             key={asset.id}
             onDragStart={(event) => event.dataTransfer.setData("asset-id", asset.id)}
             onDoubleClick={() => addAsset(asset)}
@@ -253,17 +264,20 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
                 setContextMenu({ kind: "asset", assetId: asset.id, ...keyboardMenuPosition(event.currentTarget) });
               }
             }}
-          ><ListPlus size={15} /><span>{asset.name}</span><small>{asset.model_id || "导入"}</small></button>)}</div>
+          ><ListPlus size={15} /><span>{asset.name}</span><small>{missingIds.has(asset.id) ? "文件缺失" : asset.model_id || "导入"}</small></button>)}</div>
         </div>
+        {(() => { const asset = project.assets.find((item) => item.id === selectedAssetId); return asset && <div className="studio-asset-preview"><header><strong>{asset.name}</strong><AssetActions asset={asset} projectPath={projectPath} missing={missingIds.has(asset.id)} onProjectChange={onProjectChange} onError={onError} /></header><AudioPreview projectPath={projectPath} path={asset.relative_path} label={asset.name} missing={missingIds.has(asset.id)} onError={onError} onMissing={() => void refresh()} /></div>; })()}
       </section>
       <aside className="inspector-pane clip-inspector">
         <div className="inspector-header"><h2>片段检查器</h2>{selected && <button className="icon-button small" title="删除片段" onClick={() => removeClip(selected.clip.id)}><Trash2 size={15} /></button>}</div>
+        {selected && missingPaths.has(selected.clip.source_path) && <p className="workbench-warning">此片段的音频文件缺失</p>}
+        {selectedAsset && <><AssetActions asset={selectedAsset} projectPath={projectPath} missing={missingIds.has(selectedAsset.id)} onProjectChange={onProjectChange} onError={onError} /><AudioPreview projectPath={projectPath} path={selectedAsset.relative_path} label={selectedAsset.name} missing={missingIds.has(selectedAsset.id)} onError={onError} onMissing={() => void refresh()} /></>}
         {!selected ? <div className="inspector-empty"><SlidersHorizontal size={24} /><span>选择时间线片段</span></div> : <>
           <label className="field"><span>名称</span><input value={selected.clip.name} onChange={(event) => updateClip(selected.clip.id, { name: event.target.value })} /></label>
           <div className="two-fields"><label className="field"><span>开始</span><input type="number" min="0" step="0.1" value={selected.clip.start_seconds} onChange={(event) => updateClip(selected.clip.id, { start_seconds: Number(event.target.value) })} /></label><label className="field"><span>增益 dB</span><input type="number" min="-60" max="24" step="0.5" value={selected.clip.gain_db} onChange={(event) => updateClip(selected.clip.id, { gain_db: Number(event.target.value) })} /></label></div>
           <div className="two-fields"><label className="field"><span>素材入点</span><input aria-label="素材入点" type="number" min="0" max={selected.clip.trim_end_seconds ?? selectedAsset?.duration_seconds} step="0.01" value={selected.clip.trim_start_seconds} onChange={(event) => { const end = selected.clip.trim_end_seconds ?? selectedAsset?.duration_seconds ?? 0; updateClip(selected.clip.id, { trim_start_seconds: Math.max(0, Math.min(Number(event.target.value), Math.max(0, end - 0.01))) }); }} /></label><label className="field"><span>素材出点</span><input aria-label="素材出点" type="number" min={selected.clip.trim_start_seconds} max={selectedAsset?.duration_seconds} step="0.01" value={selected.clip.trim_end_seconds ?? selectedAsset?.duration_seconds ?? 0} onChange={(event) => { const duration = selectedAsset?.duration_seconds ?? Number(event.target.value); updateClip(selected.clip.id, { trim_end_seconds: Math.max(selected.clip.trim_start_seconds + 0.01, Math.min(Number(event.target.value), duration)) }); }} /></label></div>
           <small className="field-hint trim-hint">入点和出点只影响时间线片段，不修改原素材。</small>
-          <button className="secondary-button full-width-button" onClick={() => selected && selectedAsset && void autoTrimAsset(selectedAsset, selected.clip.id)} disabled={processingAsset || !selectedAsset}><Scissors size={15} />{processingAsset ? "处理中" : "自动去首尾空白"}</button>
+          <button className="secondary-button full-width-button" onClick={() => selected && selectedAsset && void autoTrimAsset(selectedAsset, selected.clip.id)} disabled={processingAsset || !selectedAsset || missingIds.has(selectedAsset.id)}><Scissors size={15} />{processingAsset ? "处理中" : "自动去首尾空白"}</button>
           <small className="field-hint block-hint">创建派生素材并替换当前片段，原 WAV 保留。</small>
           <label className="field"><span>声像 <output>{selected.clip.pan.toFixed(2)}</output></span><input type="range" min="-1" max="1" step="0.01" value={selected.clip.pan} onChange={(event) => updateClip(selected.clip.id, { pan: Number(event.target.value) })} /></label>
           <div className="two-fields"><label className="field"><span>淡入</span><input type="number" min="0" step="0.01" value={selected.clip.fade_in_seconds} onChange={(event) => updateClip(selected.clip.id, { fade_in_seconds: Number(event.target.value) })} /></label><label className="field"><span>淡出</span><input type="number" min="0" step="0.01" value={selected.clip.fade_out_seconds} onChange={(event) => updateClip(selected.clip.id, { fade_out_seconds: Number(event.target.value) })} /></label></div>
@@ -284,6 +298,7 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
                 {
                   id: "add",
                   label: "加入时间线",
+                  disabled: missingIds.has(menuAsset.id),
                   icon: <ListPlus size={15} />,
                   onSelect: () => addAsset(menuAsset),
                 },
@@ -291,7 +306,7 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
                   id: "auto-trim",
                   label: "自动去首尾空白",
                   icon: <Scissors size={15} />,
-                  disabled: processingAsset,
+                  disabled: processingAsset || missingIds.has(menuAsset.id),
                   onSelect: () => autoTrimAsset(menuAsset),
                 },
               ]
@@ -308,7 +323,7 @@ export function StudioView({ projectPath, project, onProjectChange, onError }: S
                   id: "auto-trim",
                   label: "自动去首尾空白",
                   icon: <Scissors size={15} />,
-                  disabled: processingAsset,
+                  disabled: processingAsset || missingIds.has(menuAsset.id),
                   onSelect: () => {
                     if (menuClip) return autoTrimAsset(menuAsset, menuClip.clip.id);
                   },

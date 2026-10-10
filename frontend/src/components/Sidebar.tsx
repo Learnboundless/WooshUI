@@ -1,5 +1,6 @@
 import {
   AudioLines,
+  Mic2,
   Boxes,
   Copy,
   Disc3,
@@ -34,6 +35,7 @@ interface SidebarProps {
 const items: Array<{ id: ViewId; label: string; icon: typeof Sparkles }> = [
   { id: "generate", label: "生成音效", icon: Sparkles },
   { id: "music", label: "生成音乐", icon: Disc3 },
+  { id: "speech", label: "剧本配音", icon: Mic2 },
   { id: "studio", label: "工作台", icon: SlidersHorizontal },
   { id: "models", label: "模型", icon: Boxes },
   { id: "exports", label: "导出", icon: Download },

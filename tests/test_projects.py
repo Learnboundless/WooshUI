@@ -55,5 +55,5 @@ def test_open_migrates_v1_project_with_backup(
 
     migrated = project_service.open(root)
 
-    assert migrated.schema_version == 2
+    assert migrated.schema_version == 3
     assert (root / f"{MANIFEST_NAME}.bak").is_file()

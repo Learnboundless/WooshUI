@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import hashlib
 import os
 import shutil
@@ -15,6 +17,8 @@ import httpx
 from .config import StudioPaths
 from .jobs import JobControl
 from .schemas import JobStatus, ModelDependency, ModelDescriptor
+from .runtime import runtime_status
+from .translation_bundle import ARCHIVE_NAME as MULTILINGUAL_ARCHIVE, MODEL_ID as MULTILINGUAL_MODEL_ID, MODEL_REPO as MULTILINGUAL_REPO, MODEL_REVISION as MULTILINGUAL_REVISION, install_archive
 from .storage import LibraryDatabase
 
 
@@ -40,6 +44,12 @@ DEMUCS_LICENSE = "https://github.com/facebookresearch/demucs/blob/main/LICENSE"
 HEARTMULA_RELEASE = "2026-02-13"
 HEARTMULA_MODEL_ID = "HeartMuLa-3B"
 DEMUCS_MODEL_ID = "Demucs-htdemucs"
+QWEN_TTS_CUSTOM_MODEL_ID = "Qwen3-TTS-CustomVoice-1.7B"
+QWEN_TTS_BASE_MODEL_ID = "Qwen3-TTS-Base-1.7B"
+QWEN_TTS_CUSTOM_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+QWEN_TTS_BASE_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+WHISPER_MODEL_ID = "Whisper-large-v3-turbo"
+WHISPER_REPO = "openai/whisper-large-v3-turbo"
 HEARTMULA_REQUIRED_SPACE = 30_000_000_000
 
 HEARTMULA_FILES = (
@@ -208,9 +218,7 @@ class ModelService:
     def models_root(self) -> Path:
         configured = self.database.get_settings().model_root
         root = (
-            Path(configured).expanduser().resolve()
-            if configured
-            else self.paths.models
+            Path(configured).expanduser().resolve() if configured else self.paths.models
         )
         root.mkdir(parents=True, exist_ok=True)
         return root
@@ -227,6 +235,9 @@ class ModelService:
             for model_id in MODEL_DEFINITIONS
             if (archive_directory / f"{model_id}.zip").is_file()
         ]
+        multilingual_archive = archive_directory / MULTILINGUAL_ARCHIVE
+        if multilingual_archive.is_file():
+            self.ensure_bundled_translation(multilingual_archive)
         music_archive = archive_directory / f"{HEARTMULA_MODEL_ID}.zip"
         demucs_archive = archive_directory / f"{DEMUCS_MODEL_ID}.zip"
         if music_archive.is_file() and not self._music_valid(self.music_path()):
@@ -292,11 +303,14 @@ class ModelService:
                     license="CC BY-NC 4.0",
                     license_url=WOOSH_LICENSE,
                     installed=self.is_installed(model_id),
-                    path=str(self.model_path(model_id)) if self.is_installed(model_id) else None,
+                    path=str(self.model_path(model_id))
+                    if self.is_installed(model_id)
+                    else None,
                     dependencies=dependencies,
                     controls=definition["controls"],
                 )
             )
+        runtime_ready = runtime_status().ready
         music_path = self.music_path()
         descriptors.append(
             ModelDescriptor(
@@ -326,10 +340,19 @@ class ModelService:
                         size_bytes=9_085_758,
                     ),
                 ],
-                controls=["tags", "lyrics", "duration", "temperature", "top_k", "cfg_scale", "seed"],
+                controls=[
+                    "tags",
+                    "lyrics",
+                    "duration",
+                    "temperature",
+                    "top_k",
+                    "cfg_scale",
+                    "seed",
+                ],
                 engine="heartmula",
                 model_source="modelscope",
                 memory_mode="auto_low_vram",
+                supported=runtime_ready,
             )
         )
         demucs_path = self.demucs_path()
@@ -354,36 +377,91 @@ class ModelService:
                 controls=["four_stems"],
                 engine="demucs",
                 model_source="github",
+                supported=runtime_ready,
             )
         )
+        for model_id, name, description, repo in (
+            (
+                QWEN_TTS_CUSTOM_MODEL_ID,
+                "Qwen3-TTS 固定音色",
+                "内置 9 种角色音色，支持语气与情绪指令。",
+                QWEN_TTS_CUSTOM_REPO,
+            ),
+            (
+                QWEN_TTS_BASE_MODEL_ID,
+                "Qwen3-TTS 参考音色",
+                "使用本地参考音频固定角色音色，支持多语言台词。",
+                QWEN_TTS_BASE_REPO,
+            ),
+        ):
+            path = self.model_path(model_id)
+            descriptors.append(
+                ModelDescriptor(
+                    id=model_id,
+                    name=name,
+                    family="speech",
+                    description=description,
+                    release="12Hz-1.7B",
+                    license="Apache 2.0",
+                    license_url="https://www.apache.org/licenses/LICENSE-2.0",
+                    installed=self._speech_valid(path),
+                    path=str(path) if self._speech_valid(path) else None,
+                    dependencies=[
+                        ModelDependency(id=model_id, asset_name=repo, size_bytes=0)
+                    ],
+                    controls=["language", "speaker", "instruct"],
+                    engine="qwen_tts",
+                    model_source="huggingface",
+                    memory_mode="auto_low_vram",
+                    supported=runtime_ready,
+                )
+            )
+        descriptors.append(ModelDescriptor(
+            id=MULTILINGUAL_MODEL_ID, name="多语种对白翻译", family="translation",
+            description="M2M100 INT8 本地翻译，随应用安装，首次启动自动准备；支持中、英、日、韩等语言互译，无需下载。",
+            bundled=bool(self.bundled_translation_archive()),
+            license="MIT", license_url="https://huggingface.co/facebook/m2m100_418M",
+            installed=self._multilingual_valid(self.model_path(MULTILINGUAL_MODEL_ID)),
+            path=str(self.model_path(MULTILINGUAL_MODEL_ID)) if self._multilingual_valid(self.model_path(MULTILINGUAL_MODEL_ID)) else None,
+            dependencies=[] if self.bundled_translation_archive() else [ModelDependency(id=MULTILINGUAL_MODEL_ID, asset_name="M2M100 源权重与分词器", size_bytes=1900000000)],
+            controls=[], engine="ctranslate2", model_source="local" if self.bundled_translation_archive() else "huggingface", memory_mode="cpu",
+        ))
+        asr_path = self.model_path(WHISPER_MODEL_ID)
+        descriptors.append(ModelDescriptor(id=WHISPER_MODEL_ID, name="Whisper 参考音频转文字", family="transcription",
+            description="本地识别麦克风录音或参考音频，识别后的台词可校对编辑。安装后离线使用。",
+            release="large-v3-turbo", license="MIT", license_url="https://huggingface.co/openai/whisper-large-v3-turbo",
+            installed=self._asr_valid(asr_path), path=str(asr_path) if self._asr_valid(asr_path) else None,
+            dependencies=[ModelDependency(id=WHISPER_MODEL_ID, asset_name=WHISPER_REPO)],
+            engine="transformers", model_source="huggingface", controls=["transcribe"], supported=runtime_ready))
         translation_path = self.translation_path()
-        descriptors.append(
-            ModelDescriptor(
-                id=TRANSLATION_MODEL_ID,
-                name="轻量中文转英文",
-                family="translation",
-                description="约 82 MB 的 INT8 本地翻译模型，首次使用自动准备。",
-                license="CC BY 4.0",
-                license_url=TRANSLATION_LICENSE,
-                installed=self._translation_valid(translation_path),
-                path=(
-                    str(translation_path)
-                    if self._translation_valid(translation_path)
-                    else None
-                ),
-                dependencies=[
-                    ModelDependency(
-                        id="opus-mt-zh-en-int8",
-                        asset_name="CTranslate2 INT8 weights",
-                        size_bytes=TRANSLATION_DOWNLOAD_SIZE,
-                    )
-                ],
-                controls=[],
-                engine="ctranslate2",
-                model_source="huggingface",
-                memory_mode="cpu",
+        if self._translation_valid(translation_path) or not self.bundled_translation_archive():
+            descriptors.append(
+                ModelDescriptor(
+                    id=TRANSLATION_MODEL_ID,
+                    name="轻量中文转英文",
+                    family="translation",
+                    description="约 82 MB 的 INT8 本地翻译模型，首次使用自动准备。",
+                    license="CC BY 4.0",
+                    license_url=TRANSLATION_LICENSE,
+                    installed=self._translation_valid(translation_path),
+                    path=(
+                        str(translation_path)
+                        if self._translation_valid(translation_path)
+                        else None
+                    ),
+                    dependencies=[
+                        ModelDependency(
+                            id="opus-mt-zh-en-int8",
+                            asset_name="CTranslate2 INT8 weights",
+                            size_bytes=TRANSLATION_DOWNLOAD_SIZE,
+                        )
+                    ],
+                    controls=[],
+                    engine="ctranslate2",
+                    model_source="huggingface",
+                    memory_mode="cpu",
+                )
             )
-        )
         for custom in self.database.custom_models():
             descriptors.append(
                 ModelDescriptor(
@@ -406,6 +484,8 @@ class ModelService:
             return self.music_path()
         if model_id == DEMUCS_MODEL_ID:
             return self.demucs_path()
+        if model_id in {QWEN_TTS_CUSTOM_MODEL_ID, QWEN_TTS_BASE_MODEL_ID}:
+            return self.models_root / "Qwen3-TTS" / model_id
         custom = next(
             (item for item in self.database.custom_models() if item["id"] == model_id),
             None,
@@ -427,10 +507,18 @@ class ModelService:
         return self.models_root / DEMUCS_MODEL_ID
 
     def is_installed(self, model_id: str) -> bool:
+        if model_id == WHISPER_MODEL_ID:
+            return self._asr_valid(self.model_path(model_id))
+        if model_id == MULTILINGUAL_MODEL_ID:
+            return self._multilingual_valid(self.model_path(model_id))
+        if model_id == TRANSLATION_MODEL_ID:
+            return self._translation_valid(self.translation_path())
         if model_id == HEARTMULA_MODEL_ID:
             return self._music_valid(self.music_path())
         if model_id == DEMUCS_MODEL_ID:
             return self._demucs_valid(self.demucs_path())
+        if model_id in {QWEN_TTS_CUSTOM_MODEL_ID, QWEN_TTS_BASE_MODEL_ID}:
+            return self._speech_valid(self.model_path(model_id))
         definition = MODEL_DEFINITIONS.get(model_id)
         if not definition:
             return self.model_path(model_id).exists()
@@ -442,16 +530,24 @@ class ModelService:
     def register_custom(self, model_id: str, path: Path) -> ModelDescriptor:
         path = path.expanduser().resolve()
         if not self._checkpoint_valid(path):
-            raise ValueError("checkpoint 必须包含 config.yaml 和 weights.safetensors/weights.pt")
+            raise ValueError(
+                "checkpoint 必须包含 config.yaml 和 weights.safetensors/weights.pt"
+            )
         self.database.register_custom_model(model_id, path, "text")
         return next(item for item in self.list_models() if item.id == model_id)
 
     def remove(self, model_id: str) -> None:
+        if model_id == MULTILINGUAL_MODEL_ID and self.bundled_translation_archive():
+            raise ValueError("多语种翻译是内置组件，由应用自动维护")
         removable = {
+            WHISPER_MODEL_ID,
             *MODEL_DEFINITIONS,
             TRANSLATION_MODEL_ID,
+            MULTILINGUAL_MODEL_ID,
             HEARTMULA_MODEL_ID,
             DEMUCS_MODEL_ID,
+            QWEN_TTS_CUSTOM_MODEL_ID,
+            QWEN_TTS_BASE_MODEL_ID,
         }
         if model_id not in removable:
             raise ValueError("自定义模型只会取消注册，不删除用户文件")
@@ -464,16 +560,24 @@ class ModelService:
             shutil.rmtree(target)
 
     def download_worker(self, model_id: str):
+        if model_id == WHISPER_MODEL_ID:
+            return self._asr_download_worker
+        if model_id == MULTILINGUAL_MODEL_ID:
+            return self._multilingual_download_worker
         if model_id == TRANSLATION_MODEL_ID:
             return self._translation_download_worker
         if model_id == HEARTMULA_MODEL_ID:
             return self._music_download_worker
         if model_id == DEMUCS_MODEL_ID:
             return self._demucs_download_worker
+        if model_id in {QWEN_TTS_CUSTOM_MODEL_ID, QWEN_TTS_BASE_MODEL_ID}:
+            return self._speech_download_worker(model_id)
         if model_id not in MODEL_DEFINITIONS:
             raise KeyError(model_id)
 
         def worker(job_id: str, update, control: JobControl) -> dict[str, Any]:
+            if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+                raise RuntimeError("当前为离线运行模式，无法在线下载模型")
             if not self.database.license_accepted(model_id, "v1.0.0"):
                 raise RuntimeError("下载官方权重前必须确认 CC BY-NC 4.0 许可")
             assets = MODEL_DEFINITIONS[model_id]["assets"]
@@ -516,6 +620,8 @@ class ModelService:
     def _music_download_worker(
         self, job_id: str, update, control: JobControl
     ) -> dict[str, Any]:
+        if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+            raise RuntimeError("当前为离线运行模式，无法在线下载 HeartMuLa")
         if not self.database.license_accepted(HEARTMULA_MODEL_ID, HEARTMULA_RELEASE):
             raise RuntimeError("下载 HeartMuLa 权重前必须确认 Apache 2.0 许可")
         root = self.music_path()
@@ -545,14 +651,15 @@ class ModelService:
                 url,
                 target,
                 control,
-                lambda progress, speed, item=item, item_size=item_size,
-                completed_bytes=completed_bytes: update(
-                    status=JobStatus.RUNNING,
-                    stage=f"下载 {Path(str(item['path'])).name}",
-                    progress=(
-                        completed_bytes + progress * item_size
-                    ) / total_bytes * 0.92,
-                    speed_bytes_per_second=speed,
+                lambda progress, speed, item=item, item_size=item_size, completed_bytes=completed_bytes: (
+                    update(
+                        status=JobStatus.RUNNING,
+                        stage=f"下载 {Path(str(item['path'])).name}",
+                        progress=(completed_bytes + progress * item_size)
+                        / total_bytes
+                        * 0.92,
+                        speed_bytes_per_second=speed,
+                    )
                 ),
                 expected_size=item_size,
             )
@@ -573,6 +680,8 @@ class ModelService:
     def _demucs_download_worker(
         self, job_id: str, update, control: JobControl
     ) -> dict[str, Any]:
+        if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+            raise RuntimeError("当前为离线运行模式，无法在线下载 Demucs")
         target = self.demucs_path() / str(DEMUCS_FILE["name"])
         target.parent.mkdir(parents=True, exist_ok=True)
         self._download_file(
@@ -593,9 +702,140 @@ class ModelService:
         self._prepare_demucs_repository(target.parent)
         return {"model_id": DEMUCS_MODEL_ID, "path": str(target)}
 
+    @staticmethod
+    def _asr_valid(path):
+        return all((path / name).is_file() for name in ("config.json", "preprocessor_config.json", "tokenizer.json", "model.safetensors"))
+
+    def _asr_download_worker(self, job_id, update, control):
+        if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+            raise RuntimeError("当前为离线运行模式，请将 Whisper-large-v3-turbo 本地模型文件夹放入共享模型目录")
+        from huggingface_hub import HfApi
+        target = self.model_path(WHISPER_MODEL_ID)
+        update(status=JobStatus.RUNNING, stage="获取语音识别模型文件清单", progress=0.01)
+        info = HfApi().model_info(WHISPER_REPO, files_metadata=True)
+        wanted = [item for item in info.siblings if item.rfilename in {"config.json", "generation_config.json", "preprocessor_config.json", "tokenizer.json", "tokenizer_config.json", "normalizer.json", "special_tokens_map.json", "vocab.json", "merges.txt", "added_tokens.json", "model.safetensors"}]
+        total = sum(item.size or 0 for item in wanted) or 1
+        if shutil.disk_usage(self.models_root).free < total + 500_000_000:
+            raise RuntimeError("磁盘空间不足以安装语音识别模型")
+        completed = 0
+        for item in wanted:
+            control.checkpoint()
+            self._download_file(f"https://huggingface.co/{WHISPER_REPO}/resolve/{info.sha}/{item.rfilename}", target / item.rfilename,
+                control, lambda value, speed: update(status=JobStatus.RUNNING, stage=f"下载语音识别模型 · {item.rfilename}", progress=(completed + value * (item.size or 0)) / total * 0.97,
+                speed_bytes_per_second=speed), expected_size=item.size)
+            if item.lfs and item.lfs.sha256:
+                from .localization import file_digest
+                if file_digest(target / item.rfilename) != item.lfs.sha256:
+                    raise RuntimeError("语音识别模型权重校验失败")
+            completed += item.size or 0
+        if not self._asr_valid(target):
+            raise RuntimeError("语音识别模型文件不完整")
+        (target / "woosh-model-revision.json").write_text(json.dumps({"revision": info.sha}), encoding="utf-8")
+        return {"model_id": WHISPER_MODEL_ID, "path": str(target)}
+
+    def _speech_download_worker(self, model_id: str):
+        def worker(job_id: str, update, control: JobControl) -> dict[str, Any]:
+            if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+                raise RuntimeError("当前为离线运行模式，无法在线下载 Qwen3-TTS")
+            from huggingface_hub import snapshot_download
+
+            repo = (
+                QWEN_TTS_CUSTOM_REPO
+                if model_id == QWEN_TTS_CUSTOM_MODEL_ID
+                else QWEN_TTS_BASE_REPO
+            )
+            target = self.model_path(model_id)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            update(status=JobStatus.RUNNING, stage="下载 Qwen3-TTS", progress=0.1)
+            snapshot_download(
+                repo_id=repo, local_dir=str(target)
+            )
+            update(status=JobStatus.RUNNING, stage="验证 Qwen3-TTS", progress=0.98)
+            if not self._speech_valid(target):
+                raise RuntimeError("Qwen3-TTS 模型目录校验失败")
+            return {"model_id": model_id, "path": str(target), "repo": repo}
+
+        return worker
+
+    def bundled_translation_archive(self) -> Path | None:
+        standalone = os.environ.get("WOOSH_STUDIO_TRANSLATION_BUNDLE")
+        if standalone and Path(standalone).is_file():
+            return Path(standalone)
+        configured = os.environ.get("WOOSH_STUDIO_OFFLINE_MODELS")
+        if configured:
+            candidate = Path(configured) / MULTILINGUAL_ARCHIVE
+            if candidate.is_file():
+                return candidate
+        # Installed backend lives in <app>/python/woosh_studio. Development
+        # launchers pass an explicit archive directory; tests stay self contained.
+        candidate = Path(__file__).resolve().parents[2] / "offline-model-archives" / MULTILINGUAL_ARCHIVE
+        return candidate if candidate.is_file() else None
+
+    def ensure_bundled_translation(self, archive: Path | None = None) -> Path:
+        target = self.model_path(MULTILINGUAL_MODEL_ID)
+        archive = archive or self.bundled_translation_archive()
+        if archive is None:
+            return target
+        with self._asset_locks.setdefault(MULTILINGUAL_MODEL_ID, Lock()):
+            print("WOOSH_OFFLINE_PROGRESS 0 1 内置多语种翻译", flush=True)
+            try:
+                install_archive(archive, target)
+            except (OSError, ValueError, zipfile.BadZipFile) as error:
+                raise RuntimeError(f"内置多语种翻译准备失败，请修复安装或检查模型目录权限：{error}") from error
+            print("WOOSH_OFFLINE_PROGRESS 1 1 内置多语种翻译", flush=True)
+        return target
+
+    def _install_multilingual_archive(self, archive: Path) -> None:
+        self.ensure_bundled_translation(archive)
+
+    @staticmethod
+    def _multilingual_valid(path: Path) -> bool:
+        return all((path / filename).is_file() for filename in ("model.bin", "config.json", "shared_vocabulary.json", "tokenizer/sentencepiece.bpe.model", "tokenizer/vocab.json"))
+
+    def _multilingual_download_worker(self, job_id, update, control):
+        if self.bundled_translation_archive():
+            update(status=JobStatus.RUNNING, stage="准备内置多语种翻译", progress=0.1)
+            control.checkpoint()
+            target = self.ensure_bundled_translation()
+            return {"model_id": MULTILINGUAL_MODEL_ID, "path": str(target), "source": "bundled"}
+        target = self.model_path(MULTILINGUAL_MODEL_ID)
+        with self._asset_locks.setdefault(MULTILINGUAL_MODEL_ID, Lock()):
+            if self._multilingual_valid(target):
+                return {"model_id": MULTILINGUAL_MODEL_ID, "path": str(target)}
+            if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+                raise RuntimeError("多语种翻译模型尚未安装。当前离线，请将完整 m2m100-418M-int8 文件夹复制到模型目录。")
+            from huggingface_hub import snapshot_download
+            from ctranslate2.converters import TransformersConverter
+            if shutil.disk_usage(self.models_root).free < 5_000_000_000:
+                raise RuntimeError("安装多语种翻译模型需要至少 5 GB 可用空间")
+            source = self.downloads_root / ".m2m100-source"
+            staging = target.with_name(f".{target.name}-{uuid4().hex}.tmp")
+            try:
+                update(status=JobStatus.RUNNING, stage="下载多语种翻译模型（约 1.9 GB）", progress=0.05)
+                snapshot_download(repo_id=MULTILINGUAL_REPO, revision=MULTILINGUAL_REVISION, local_dir=str(source), allow_patterns=["*.json", "pytorch_model.bin", "sentencepiece.bpe.model"])
+                control.checkpoint()
+                update(status=JobStatus.RUNNING, stage="转换多语种 INT8 翻译模型", progress=0.8)
+                TransformersConverter(str(source)).convert(str(staging), quantization="int8", force=True)
+                tokenizer = staging / "tokenizer"
+                tokenizer.mkdir()
+                for file in source.iterdir():
+                    if file.suffix == ".json" or file.name == "sentencepiece.bpe.model":
+                        shutil.copy2(file, tokenizer / file.name)
+                control.checkpoint()
+                if not self._multilingual_valid(staging):
+                    raise RuntimeError("多语种翻译模型转换校验失败")
+                if target.exists():
+                    shutil.rmtree(target)
+                os.replace(staging, target)
+                return {"model_id": MULTILINGUAL_MODEL_ID, "path": str(target)}
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
     def _translation_download_worker(
         self, job_id: str, update, control: JobControl
     ) -> dict[str, Any]:
+        if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+            raise RuntimeError("当前为离线运行模式，无法在线下载翻译模型")
         destination = self.translation_path()
         if self._translation_valid(destination):
             return {"model_id": TRANSLATION_MODEL_ID, "path": str(destination)}
@@ -616,12 +856,13 @@ class ModelService:
                     self._translation_file_url(filename),
                     target,
                     control,
-                    lambda progress, speed, filename=filename, size=size,
-                    completed=completed: update(
-                        status=JobStatus.RUNNING,
-                        stage=f"下载轻量翻译模型 · {filename}",
-                        progress=(completed + progress * size) / required * 0.72,
-                        speed_bytes_per_second=speed,
+                    lambda progress, speed, filename=filename, size=size, completed=completed: (
+                        update(
+                            status=JobStatus.RUNNING,
+                            stage=f"下载轻量翻译模型 · {filename}",
+                            progress=(completed + progress * size) / required * 0.72,
+                            speed_bytes_per_second=speed,
+                        )
                     ),
                     expected_size=size,
                 )
@@ -698,9 +939,7 @@ class ModelService:
                             written += len(chunk)
                             elapsed = max(time.monotonic() - started, 0.001)
                             progress = min(written / total, 1) if total else 0
-                            on_progress(
-                                progress, (written - existing) / elapsed
-                            )
+                            on_progress(progress, (written - existing) / elapsed)
                 if expected_size is None or written == expected_size:
                     os.replace(partial, destination)
                     return
@@ -794,6 +1033,14 @@ class ModelService:
         return target.is_file() and target.stat().st_size == int(DEMUCS_FILE["size"])
 
     @staticmethod
+    def _speech_valid(path: Path) -> bool:
+        return (
+            (path / "config.json").is_file()
+            and (path / "model.safetensors").is_file()
+            and (path / "speech_tokenizer").is_dir()
+        )
+
+    @staticmethod
     def _translation_valid(path: Path) -> bool:
         return all(
             (path / filename).is_file()
@@ -809,11 +1056,11 @@ class ModelService:
     @staticmethod
     def _prepare_demucs_repository(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
-        (path / "htdemucs.yaml").write_text(
-            "models: ['955717e8']\n", encoding="utf-8"
-        )
+        (path / "htdemucs.yaml").write_text("models: ['955717e8']\n", encoding="utf-8")
 
     def _release_sizes(self) -> dict[str, int]:
+        if os.environ.get("WOOSH_STUDIO_OFFLINE") == "1":
+            return {}
         try:
             response = httpx.get(
                 RELEASE_API,

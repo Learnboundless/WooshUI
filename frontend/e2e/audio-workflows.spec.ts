@@ -1,0 +1,78 @@
+import { expect, test } from "@playwright/test";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const backend = "http://127.0.0.1:8765/api/v1";
+const artifacts = path.resolve("../.artifacts/audio-workflows-ui");
+
+test("auditions dialogue, translates locally, generates music and exposes missing-file recovery and errors", async ({ page, request, context }) => {
+  test.setTimeout(90000);
+  await fs.mkdir(artifacts, { recursive: true });
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const created = await (await request.post(`${backend}/projects`, { data: { parent_directory: artifacts, name: `多语言试听-${Date.now()}` } })).json();
+  const script = { title: "幸存者", voices: [{ id: "hero", name: "Vivian", mode: "custom_voice", language: "Chinese", speaker: "Vivian", instruct: "自然清晰", reference_audio: null, reference_text: "" }], lines: [{ id: "line", character: "Vivian", text: "我们必须活下去，直到救援到来。", voice_id: "hero", language: "Chinese", source_language: "Chinese", enabled: true, instruct: "", asset_id: null }] };
+  expect((await request.put(`${backend}/projects/script`, { data: { project_path: created.path, script } })).ok()).toBeTruthy();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/");
+  await page.getByRole("button", { name: created.manifest.name, exact: true }).click();
+  await page.getByRole("button", { name: "剧本配音", exact: true }).click();
+  await page.getByLabel("角色语言（同步台词并自动翻译）").selectOption("English");
+  await expect(page.getByLabel("第 1 句译文")).toBeVisible({ timeout: 20000 });
+  await expect(page.getByLabel("第 1 句译文")).toHaveValue(/rescue/);
+  await expect(page.getByLabel("第 1 句台词")).toHaveValue(script.lines[0].text);
+  await page.getByRole("button", { name: "生成 1 句配音", exact: true }).click();
+  const audio = page.getByLabel("第 1 句配音试听", { exact: true });
+  await expect(audio).toBeVisible({ timeout: 20000 });
+  await page.getByTitle("试听 第 1 句配音试听", { exact: true }).click();
+  await expect.poll(() => audio.evaluate((element) => (element as HTMLAudioElement).currentTime)).toBeGreaterThan(0);
+  await expect.poll(() => audio.evaluate((element) => (element as HTMLAudioElement).duration)).toBeGreaterThan(0);
+  await page.screenshot({ path: path.join(artifacts, "01-dialogue-audition-translation.png") });
+  const manifest = await (await request.post(`${backend}/projects/open`, { data: { path: created.path } })).json();
+  const voice = manifest.assets.find((asset: { kind: string }) => asset.kind === "voice_line");
+  const file = path.join(created.path, voice.relative_path);
+  const relocated = path.join(artifacts, `moved-${Date.now()}.wav`);
+  await fs.rename(file, relocated);
+  await page.getByRole("button", { name: "刷新配音与文件状态", exact: true }).click();
+  await expect(page.getByText("文件缺失 · 请重新关联或生成", { exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(artifacts, "02-missing-dialogue.png") });
+  await page.getByTitle(`重新关联 ${voice.name}`, { exact: true }).click();
+  await page.getByLabel("重新关联音频路径").fill(relocated);
+  await page.getByRole("button", { name: "确认关联", exact: true }).click();
+  await expect(audio).toBeVisible();
+  await page.getByTitle(`删除素材 ${voice.name}`, { exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "从项目移除素材" })).toBeVisible();
+  await page.getByRole("button", { name: "确认移除", exact: true }).click();
+  await expect(audio).toHaveCount(0);
+  expect((await fs.stat(relocated)).isFile()).toBeTruthy();
+
+  await page.getByRole("button", { name: "生成音乐", exact: true }).click();
+  await page.getByRole("button", { name: "30s", exact: true }).click();
+  await page.getByRole("button", { name: "生成 1 个变体", exact: true }).click();
+  const musicAudio = page.locator(".music-audio-asset audio").first();
+  await expect(musicAudio).toBeVisible({ timeout: 30000 });
+  await expect(page.locator(".music-audio-asset")).toHaveCount(5);
+  await musicAudio.evaluate((element) => (element as HTMLAudioElement).play());
+  await expect.poll(() => musicAudio.evaluate((element) => (element as HTMLAudioElement).currentTime)).toBeGreaterThan(0);
+  await page.screenshot({ path: path.join(artifacts, "03-music-audition.png") });
+
+  // A missing source triggers an actual backend job error with a traceback and named stage.
+  const musicManifest = await (await request.post(`${backend}/projects/open`, { data: { path: created.path } })).json();
+  const mix = musicManifest.assets.find((asset: { kind: string }) => asset.kind === "music_mix");
+  const mixPath = path.join(created.path, mix.relative_path);
+  await fs.rename(mixPath, path.join(artifacts, `mix-${Date.now()}.wav`));
+  const failed = await (await request.post(`${backend}/assets/${mix.id}/separate`, { data: { project_path: created.path } })).json();
+  await expect.poll(async () => (await (await request.get(`${backend}/jobs/${failed.id}`)).json()).status).toBe("failed");
+  const failedRecord = await (await request.get(`${backend}/jobs/${failed.id}`)).json();
+  await page.getByTitle(failedRecord.error.message, { exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "任务详情与历史" })).toBeVisible();
+  await page.getByText("失败阶段与原始错误", { exact: true }).click();
+  await expect(page.getByText(/失败阶段：/)).toBeVisible();
+  await page.getByText("失败阶段与原始错误", { exact: true }).click();
+  await page.getByRole("button", { name: "复制诊断信息", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain(failed.id);
+  await page.screenshot({ path: path.join(artifacts, "04-failure-details.png") });
+  await page.getByRole("button", { name: "关闭弹窗", exact: true }).click();
+  await page.getByRole("button", { name: "工作台", exact: true }).click();
+  await expect(page.getByText(/个素材文件缺失。选择素材/)).toBeVisible();
+  await page.screenshot({ path: path.join(artifacts, "05-missing-assets.png") });
+});

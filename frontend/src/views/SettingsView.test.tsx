@@ -11,6 +11,7 @@ const capabilities = {
   effective_device: "cuda" as const,
   disk_free_bytes: 100_000_000_000,
   model_root: "E:\\AIModels\\WooshStudio",
+  runtime: { offline: true, source: "bundled" as const, ready: true, version: "test", heartmula_ready: true, heartcodec_ready: true, demucs_ready: true },
   settings: {
     device: "auto" as const,
     active_model: "Woosh-DFlow",

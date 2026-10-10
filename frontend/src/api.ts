@@ -1,4 +1,13 @@
 import type {
+  AgentTemplate,
+  AssetHealth,
+  FreesoundSearchResponse,
+  FreesoundResult,
+  DialogueTranslation,
+  ScriptPreview,
+  ScriptDocument,
+  ResourceImportResult,
+  ResolvedResource,
   JobEvent,
   ModelDescriptor,
   GeneratedAsset,
@@ -43,19 +52,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${backend.url}/api/v1${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...(backend.token ? { "X-Woosh-Token": backend.token } : {}),
       ...init?.headers,
     },
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail || "请求失败");
+    throw new Error(typeof body.detail === "string" ? body.detail : Array.isArray(body.detail) ? body.detail.map((item: { msg: string }) => item.msg).join("；") : "请求失败");
   }
   return response.json() as Promise<T>;
 }
 
 export const api = {
+  analyzeAudio: (projectPath:string,relativePath:string) => request<import("./types").AudioAnalysis>("/projects/audio/analysis",{method:"POST",body:JSON.stringify({project_path:projectPath,relative_path:relativePath})}),
+  protectAudio: (projectPath:string,assetId:string) => request<{manifest:ProjectManifest;asset:GeneratedAsset}>(`/assets/${encodeURIComponent(assetId)}/protect`,{method:"POST",body:JSON.stringify({project_path:projectPath})}),
+  modelRuntime: () => request<import("./types").ModelRuntime>("/models/runtime"),
+  releaseModels: () => request<import("./types").ModelRuntime>("/models/runtime/release", { method: "POST" }),
+  preloadModel: (id: string) => request<JobEvent>(`/models/${id}/preload`, { method: "POST" }),
+  transcribe: (projectPath: string, referenceAudio: string, language = "Auto") => request<JobEvent>("/transcriptions", { method: "POST", body: JSON.stringify({project_path: projectPath, reference_audio: referenceAudio, language}) }),
+  retryJob: (id: string) => request<JobEvent>(`/jobs/${id}/retry`, { method: "POST" }),
+  exportLocalization: (body: Record<string, unknown>) => request<JobEvent>("/exports/localization", { method: "POST", body: JSON.stringify(body) }),
+
+  freesoundStatus: () => request<{ configured: boolean; website: string }>("/freesound/status"),
+  freesoundSearch: (query: string, page = 1, filter?: string) => request<FreesoundSearchResponse>("/freesound/search", { method: "POST", body: JSON.stringify({ query, page, page_size: 20, filter: filter || null }) }),
+  freesoundImport: (body: { project_path: string; sound_id: number; preview_url: string; download_url?: string; name: string; username: string; license: string; sound_url: string; duration: number }) => request<{ manifest: ProjectManifest; asset: GeneratedAsset }>("/freesound/import", { method: "POST", body: JSON.stringify(body) }),
+  assetHealth: (path: string) => request<AssetHealth>("/projects/assets/health", { method: "POST", body: JSON.stringify({ path }) }),
+  removeAssets: (projectPath: string, assetIds: string[]) => request<ProjectManifest>("/projects/assets", { method: "DELETE", body: JSON.stringify({ project_path: projectPath, asset_ids: assetIds }) }),
+  relinkAsset: (projectPath: string, assetId: string, sourcePath: string) => request<ProjectManifest>(`/assets/${encodeURIComponent(assetId)}/relink`, { method: "POST", body: JSON.stringify({ project_path: projectPath, source_path: sourcePath }) }),
+  saveScript: (projectPath: string, script: ScriptDocument) => request<ProjectManifest>("/projects/script", { method: "PUT", body: JSON.stringify({ project_path: projectPath, script }) }),
+  agentTemplates: () => request<AgentTemplate[]>("/agent/templates"),
+  previewScript: (text: string) => request<ScriptPreview>("/scripts/preview", { method: "POST", body: JSON.stringify({ text }) }),
+  importResources: (projectPath: string, paths: string[]) => request<ResourceImportResult>("/projects/resources/import", { method: "POST", body: JSON.stringify({ project_path: projectPath, paths }) }),
+  uploadResources: (projectPath: string, files: File[]) => {
+    const body = new FormData();
+    body.append("project_path", projectPath);
+    files.forEach((file) => body.append("files", file, file.webkitRelativePath || file.name));
+    return request<ResourceImportResult>("/projects/resources/upload", { method: "POST", body });
+  },
+  resolveResources: (projectPath: string, paths: string[]) => request<ResolvedResource[]>("/projects/resources/resolve", { method: "POST", body: JSON.stringify({ project_path: projectPath, paths }) }),
+  exportWorkflow: (path: string) => request<{ path: string }>("/agent/export", { method: "POST", body: JSON.stringify({ path }) }),
   capabilities: () => request<SystemCapabilities>("/system/capabilities"),
   updateSettings: (settings: RuntimeSettings) =>
     request<RuntimeSettings>("/system/settings", {
@@ -97,6 +133,8 @@ export const api = {
     request<JobEvent>("/generations", { method: "POST", body: JSON.stringify(body) }),
   generateMusic: (body: Record<string, unknown>) =>
     request<JobEvent>("/generations/music", { method: "POST", body: JSON.stringify(body) }),
+  generateSpeech: (body: Record<string, unknown>) =>
+    request<JobEvent>("/generations/speech", { method: "POST", body: JSON.stringify(body) }),
   separateAsset: (assetId: string, projectPath: string) =>
     request<JobEvent>(`/assets/${encodeURIComponent(assetId)}/separate`, {
       method: "POST",
@@ -127,10 +165,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  translate: (text: string) =>
-    request<{ original: string; translated: string }>("/translate", {
+  translate: (text: string, sourceLanguage = "Chinese", targetLanguage = "English") =>
+    request<{ original: string; translated: string; translation: DialogueTranslation }>("/translate", {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, source_language: sourceLanguage, target_language: targetLanguage }),
     }),
   jobs: () => request<JobEvent[]>("/jobs"),
   job: (jobId: string) => request<JobEvent>(`/jobs/${jobId}`),
@@ -150,4 +188,10 @@ export function audioUrl(projectPath: string, relativePath: string): string {
   const query = new URLSearchParams({ project_path: projectPath, relative_path: relativePath });
   const token = backend.token ? `&token=${encodeURIComponent(backend.token)}` : "";
   return `${backend.url}/api/v1/projects/audio?${query.toString()}${token}`;
+}
+
+export async function downloadWorkflow(): Promise<Blob> {
+  const response = await fetch(`${backend.url}/api/v1/agent/workflow.zip`, { headers: backend.token ? { "X-Woosh-Token": backend.token } : {} });
+  if (!response.ok) throw new Error("Skill 包下载失败");
+  return response.blob();
 }

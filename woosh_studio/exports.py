@@ -22,9 +22,10 @@ FORMAT_SETTINGS = {
 
 
 class ExportService:
-    def __init__(self, projects: ProjectService, renderer: AudioRenderService):
+    def __init__(self, projects: ProjectService, renderer: AudioRenderService, models=None):
         self.projects = projects
         self.renderer = renderer
+        self.models = models
 
     def export(self, request: ExportRequest) -> dict[str, Any]:
         root = Path(request.project_path).expanduser().resolve()
@@ -104,6 +105,87 @@ class ExportService:
             return {"directory": str(export_root), "archive": archive, "assets": records}
         return {"directory": str(export_root), "assets": records}
 
+    def export_localization(self, request):
+        from .localization import effective_voice, file_digest, speech_fingerprint, text_current, digest
+        from .model_runtime import model_revision
+        root = Path(request.project_path).expanduser().resolve()
+        manifest = self.projects.open(root)
+        locales = request.target_locales or manifest.script.target_locales
+        if not locales:
+            raise ValueError("请先选择剧本输出语言")
+        voices = {voice.id: voice for voice in manifest.script.voices}
+        assets = {asset.id: asset for asset in manifest.assets}
+        records, errors = [], []
+        for line in manifest.script.lines:
+            if not line.enabled:
+                continue
+            for locale in locales:
+                localized = line.localizations.get(locale)
+                valid_text = text_current(manifest.script, line, localized)
+                asset = assets.get(localized.asset_id) if localized else None
+                audio = None
+                status = "missing_text" if localized is None or not localized.text.strip() else "stale_text" if not valid_text else "missing_audio"
+                if valid_text and asset and line.voice_id in voices:
+                    metadata = asset.music_metadata or {}
+                    voice = effective_voice(voices[line.voice_id], locale)
+                    reference = Path(voice.reference_audio).expanduser() if voice.reference_audio else None
+                    if reference and not reference.is_absolute():
+                        reference = self.projects.resolve_project_file(root, voice.reference_audio)
+                    reference_hash = file_digest(reference) if reference and reference.is_file() else ""
+                    version = model_revision(self.models.model_path(asset.model_id)) if self.models and asset.model_id and self.models.is_installed(asset.model_id) else metadata.get("model_revision", "")
+                    fingerprint = speech_fingerprint(manifest.script, line, locale, localized, voice, version, reference_hash)
+                    source = self.projects.resolve_project_file(root, asset.relative_path)
+                    if localized.input_fingerprint == fingerprint and metadata.get("input_fingerprint") == fingerprint and source.is_file() and metadata.get("audio_sha256") == file_digest(source):
+                        audio, status = source, "ready"
+                    else:
+                        status = "stale_audio"
+                if request.require_approved and localized and localized.review_status != "approved":
+                    status = "needs_review"
+                if request.mode == "complete" and status != "ready":
+                    errors.append(f"{line.key or line.id} · {locale}: {status}")
+                if request.mode == "text" and (not valid_text or request.require_approved and localized.review_status != "approved"):
+                    errors.append(f"{line.key or line.id} · {locale}: 文本未就绪或未审核")
+                records.append({"line_id": line.id, "key": line.key, "scene_id": line.scene_id,
+                    "character_id": line.voice_id or "", "locale": locale,
+                    "text": localized.text if localized else "", "spoken_text": (localized.spoken_text or localized.text) if localized else "",
+                    "audio_path": "", "duration_ms": 0, "status": status,
+                    "source_revision": line.source_revision, "_source": audio, "_asset": asset})
+        if not records:
+            raise ValueError("剧本中没有启用台词")
+        if errors:
+            raise ValueError("多语言交付检查未通过：" + "；".join(errors[:12]))
+        export_root = root / "Exports" / (safe_name(manifest.name) + "_localization")
+        counter = 2
+        while export_root.exists():
+            export_root = root / "Exports" / f"{safe_name(manifest.name)}_localization_{counter}"
+            counter += 1
+        export_root.mkdir(parents=True)
+        licenses = []
+        for record in records:
+            source, asset = record.pop("_source"), record.pop("_asset")
+            if request.mode == "complete" and source:
+                audio, sr = sf.read(source, always_2d=True, dtype="float32")
+                directory = export_root / "audio" / record["locale"]
+                directory.mkdir(parents=True, exist_ok=True)
+                filename = safe_name(record["line_id"]).replace(".", "_")[:100] + "_" + digest(record["line_id"])[:10]
+                target = self._write_audio(directory / filename, audio, request.format, sr)
+                record.update(audio_path=target.relative_to(export_root).as_posix(), duration_ms=round(len(audio) / sr * 1000), sample_rate=sr)
+                licenses.append({"model_id": asset.model_id})
+        text_root = export_root / "text"
+        text_root.mkdir()
+        for locale in locales:
+            localized_records = {record["line_id"]: record for record in records if record["locale"] == locale}
+            (text_root / f"{locale}.json").write_text(json.dumps(localized_records, ensure_ascii=False, indent=2), encoding="utf-8")
+        fields = ["line_id", "key", "scene_id", "character_id", "locale", "text", "spoken_text", "audio_path", "duration_ms", "status", "source_revision"]
+        with (export_root / "dialogue.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(records)
+        package = {"schema_version": 1, "project_id": manifest.id, "locales": locales, "fallback_locale": None,
+                   "mode": request.mode, "lines": records, "licenses": self._licenses(licenses)}
+        (export_root / "manifest.json").write_text(json.dumps(package, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"directory": str(export_root), "line_count": len(records), "locales": locales}
+
     def _export_asset(
         self,
         root: Path,
@@ -162,6 +244,15 @@ class ExportService:
             licenses.append(
                 {
                     "component": "HeartMuLa and HeartCodec",
+                    "license": "Apache 2.0",
+                    "usage": "See license terms",
+                    "url": "https://www.apache.org/licenses/LICENSE-2.0",
+                }
+            )
+        if any(model and str(model).startswith("Qwen3-TTS") for model in models):
+            licenses.append(
+                {
+                    "component": "Qwen3-TTS speech models",
                     "license": "Apache 2.0",
                     "usage": "See license terms",
                     "url": "https://www.apache.org/licenses/LICENSE-2.0",

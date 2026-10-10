@@ -106,3 +106,24 @@ def test_real_codec_codebook_lookup_after_mmgp_offload() -> None:
         assert output.device.type == "cuda"
     finally:
         manager.unload_all()
+
+
+def test_staged_offload_retains_weights_for_consecutive_generations(monkeypatch):
+    from types import SimpleNamespace
+    import torch
+    from woosh_studio.heartmula_mmgp import _configure_staged_unload
+    calls = []
+    manager = SimpleNamespace(unload_all=lambda: calls.append("unload"))
+    def layer():
+        return SimpleNamespace(caches_are_setup=lambda: False)
+    mula = SimpleNamespace(backbone=layer(), decoder=layer(), backbone_causal_mask=None, decoder_causal_mask=None)
+    codec = object()
+    pipeline = SimpleNamespace(_mula=mula, _codec=codec)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    _configure_staged_unload(pipeline, manager)
+    for _ in range(2):
+        pipeline._unload()  # after the music transformer
+        pipeline._unload()  # after codec decoding
+        assert pipeline._mula is mula
+        assert pipeline._codec is codec
+    assert len(calls) == 4

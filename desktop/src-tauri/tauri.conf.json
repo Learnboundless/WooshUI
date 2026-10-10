@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Woosh Studio",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "identifier": "com.learnboundless.wooshstudio",
   "build": {
     "beforeDevCommand": "npm --prefix ../frontend run dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm --prefix ../frontend run build",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/prepare-bundled-translation.ps1 -BuildFrontend",
     "frontendDist": "../../frontend/dist"
   },
   "app": {
@@ -28,21 +28,26 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi"],
+    "targets": [
+      "msi"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/uv"],
+    "externalBin": [
+      "binaries/uv"
+    ],
     "resources": {
       "../../pyproject.toml": "python/pyproject.toml",
       "../../uv.lock": "python/uv.lock",
       "../../README.md": "python/README.md",
       "../../woosh": "python/woosh",
       "../../woosh_studio": "python/woosh_studio",
-      "../../checkpoints": "python/checkpoints"
+      "../../checkpoints": "python/checkpoints",
+      "../../.artifacts/model-archives/M2M100-418M-int8.zip": "offline-model-archives/M2M100-418M-int8.zip"
     },
     "windows": {
       "wix": {

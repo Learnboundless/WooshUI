@@ -80,6 +80,13 @@ class LibraryDatabase:
                     family TEXT NOT NULL,
                     registered_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS speech_items (
+                    job_id TEXT NOT NULL, line_id TEXT NOT NULL, locale TEXT NOT NULL,
+                    project_path TEXT NOT NULL, fingerprint TEXT, status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 1, data TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(job_id, line_id, locale)
+                );
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -93,6 +100,9 @@ class LibraryDatabase:
                     updated_at TEXT NOT NULL
                 );
                 """
+            )
+            connection.execute(
+                "UPDATE speech_items SET status = 'interrupted' WHERE status IN ('queued', 'running')"
             )
             connection.execute(
                 "UPDATE jobs SET status = ?, stage = ?, updated_at = ? "
@@ -198,6 +208,7 @@ class LibraryDatabase:
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status = excluded.status,
+                    payload = excluded.payload,
                     result = excluded.result,
                     error = excluded.error,
                     progress = excluded.progress,
@@ -217,3 +228,82 @@ class LibraryDatabase:
                     job.updated_at.isoformat(),
                 ),
             )
+
+    def recent_jobs(self, limit: int = 100) -> list[JobEvent]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            for key in ("payload", "result", "error"):
+                data[key] = json.loads(data[key]) if data[key] else None
+            result.append(JobEvent.model_validate(data))
+        return result
+
+    def save_speech_item(
+        self, job_id, line_id, locale, project_path, status, fingerprint=None, **data
+    ):
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO speech_items(job_id,line_id,locale,project_path,status,fingerprint,data,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(job_id,line_id,locale) DO UPDATE SET "
+                "status=excluded.status,fingerprint=excluded.fingerprint,data=excluded.data,updated_at=excluded.updated_at",
+                (
+                    job_id,
+                    line_id,
+                    locale,
+                    str(Path(project_path).resolve()),
+                    status,
+                    fingerprint,
+                    json.dumps(data, ensure_ascii=False),
+                    utc_now().isoformat(),
+                ),
+            )
+
+    def speech_items(self, project_path=None, job_id=None, status=None):
+        clauses, values = [], []
+        for key, value in (
+            (
+                "project_path",
+                str(Path(project_path).resolve()) if project_path else None,
+            ),
+            ("job_id", job_id),
+            ("status", status),
+        ):
+            if value is not None:
+                clauses.append(key + " = ?")
+                values.append(value)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM speech_items"
+                + (" WHERE " + " AND ".join(clauses) if clauses else "")
+                + " ORDER BY updated_at",
+                values,
+            ).fetchall()
+        return [{**dict(row), "data": json.loads(row["data"])} for row in rows]
+
+    def sfx_batches(self, project_path):
+        import os
+
+        key = os.path.normcase(str(Path(project_path).resolve()))
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,payload,result FROM jobs WHERE kind='generation' AND result IS NOT NULL ORDER BY created_at"
+            ).fetchall()
+        groups = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+                result = json.loads(row["result"])
+                if (
+                    os.path.normcase(
+                        str(Path(payload.get("project_path", "")).resolve())
+                    )
+                    == key
+                ):
+                    groups.append((row["id"], result.get("asset_ids", [])))
+            except (ValueError, TypeError):
+                continue
+        return groups

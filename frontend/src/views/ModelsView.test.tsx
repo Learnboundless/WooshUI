@@ -54,4 +54,13 @@ describe("ModelsView", () => {
     expect(refresh).toHaveBeenCalled();
     pause.mockRestore();
   });
+  it("presents bundled translation as ready with no manual download or removal action", () => {
+    const builtin: ModelDescriptor = { ...musicModel, id: "m2m100-418M-int8", family: "translation", name: "多语种对白翻译", installed: true, bundled: true, path: "E:/models/m2m100-418M-int8", engine: "ctranslate2", model_source: "local", dependencies: [] };
+    render(<ModelsView models={[builtin]} jobs={[]} modelRoot="E:/models" onRefresh={vi.fn()} onError={vi.fn()} />);
+    expect(screen.getByText("内置 · 就绪")).toBeInTheDocument();
+    expect(screen.getByText("随应用安装 · 无需下载")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载" })).not.toBeInTheDocument();
+    expect(screen.queryByTitle("移除模型")).not.toBeInTheDocument();
+  });
+
 });

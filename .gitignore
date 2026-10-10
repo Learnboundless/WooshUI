@@ -144,3 +144,6 @@ test-results/
 .uv-tmp/
 api-dev.*.log
 ui-dev.*.log
+
+# Locally staged offline runtime (distributed as an external ZIP)
+desktop/src-tauri/runtime/

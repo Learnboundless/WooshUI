@@ -54,13 +54,18 @@ fn backend_info(state: State<'_, BackendState>) -> BackendInfo {
 fn reveal_in_explorer(path: String) -> Result<(), String> {
     let target = PathBuf::from(path);
     if !target.exists() {
-        return Err("项目目录不存在".into());
+        return Err("文件或文件夹不存在".into());
     }
 
     #[cfg(target_os = "windows")]
     {
-        return Command::new("explorer.exe")
-            .arg(target)
+        let mut command = Command::new("explorer.exe");
+        if target.is_file() {
+            command.arg("/select,").arg(&target);
+        } else {
+            command.arg(&target);
+        }
+        return command
             .creation_flags(0x08000000)
             .spawn()
             .map(|_| ())
@@ -396,10 +401,35 @@ fn environment_has_python_312(environment: &std::path::Path) -> bool {
             .unwrap_or(false)
 }
 
-fn uv_run_command(executable: &std::path::Path, source: &std::path::Path) -> Command {
+fn bundled_runtime_root(app: &tauri::App) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource) = app.path().resource_dir() {
+        candidates.push(resource.join("runtime"));
+    }
+    if let Ok(local) = app.path().app_local_data_dir() {
+        candidates.push(local.join("runtime"));
+    }
+    if let Some(model_directory) = shared_model_directory() {
+        candidates.push(model_directory.join(".runtime"));
+    }
+    candidates.into_iter().find(|root| {
+        root.join("runtime-manifest.json").is_file()
+            && root.join("python").is_dir()
+            && root.join("uv-cache").is_dir()
+    })
+}
+
+fn uv_run_command(
+    executable: &std::path::Path,
+    source: &std::path::Path,
+    offline: bool,
+) -> Command {
     let mut command = Command::new(executable);
+    command.arg("run");
+    if offline {
+        command.arg("--offline");
+    }
     command.args([
-        "run",
         "--managed-python",
         "--python",
         "3.12",
@@ -410,6 +440,8 @@ fn uv_run_command(executable: &std::path::Path, source: &std::path::Path) -> Com
         "studio",
         "--group",
         "music",
+        "--group",
+        "speech",
         "--extra",
         "cuda",
         "woosh-studio-api",
@@ -429,6 +461,7 @@ fn spawn_backend(app: &tauri::App) -> Result<BackendState, String> {
     let environment = app_data.join(".venv");
     let runtime_marker = environment.join(".woosh-runtime-version");
     let cache_path = app_data.join("uv-cache");
+    let bundled_runtime = bundled_runtime_root(app);
     let first_setup = !environment_has_python_312(&environment)
         || fs::read_to_string(&runtime_marker)
             .map(|version| version.trim() != env!("CARGO_PKG_VERSION"))
@@ -441,14 +474,18 @@ fn spawn_backend(app: &tauri::App) -> Result<BackendState, String> {
         .open(&log_path)
         .map_err(|error| error.to_string())?;
     let stderr = stdout.try_clone().map_err(|error| error.to_string())?;
-    let offline_models = app
-        .path()
+    let offline_models = app.path()
         .resource_dir()
         .map_err(|error| error.to_string())?
         .join("offline-model-archives");
+    let translation_bundle = if cfg!(debug_assertions) {
+        source.join(".artifacts").join("model-archives").join("M2M100-418M-int8.zip")
+    } else {
+        offline_models.join("M2M100-418M-int8.zip")
+    };
 
     let uv = uv_binary();
-    let mut command = uv_run_command(&uv, &source);
+    let mut command = uv_run_command(&uv, &source, bundled_runtime.is_some());
     command
         .current_dir(&source)
         .env("WOOSH_STUDIO_PORT", port.to_string())
@@ -459,9 +496,20 @@ fn spawn_backend(app: &tauri::App) -> Result<BackendState, String> {
         .env("UV_CACHE_DIR", &cache_path)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    if let Some(runtime) = bundled_runtime {
+        command
+            .env("WOOSH_STUDIO_OFFLINE", "1")
+            .env("WOOSH_STUDIO_BUNDLED_RUNTIME", "1")
+            .env("WOOSH_STUDIO_RUNTIME_MANIFEST", runtime.join("runtime-manifest.json"))
+            .env("UV_PYTHON_INSTALL_DIR", runtime.join("python"))
+            .env("UV_CACHE_DIR", runtime.join("uv-cache"));
+    }
     if let Some(model_directory) = shared_model_directory() {
         fs::create_dir_all(&model_directory).map_err(|error| error.to_string())?;
         command.env("WOOSH_MODEL_HOME", model_directory);
+    }
+    if translation_bundle.is_file() {
+        command.env("WOOSH_STUDIO_TRANSLATION_BUNDLE", translation_bundle);
     }
     if offline_models.is_dir() {
         command.env("WOOSH_STUDIO_OFFLINE_MODELS", offline_models);
@@ -567,17 +615,30 @@ mod tests {
 
     #[test]
     fn restricts_uv_to_managed_python() {
-        let command = uv_run_command(Path::new("uv"), Path::new("python-source"));
+        let command = uv_run_command(Path::new("uv"), Path::new("python-source"), false);
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        assert!(!arguments.contains(&"--offline".to_string()));
         assert_eq!(
             &arguments[..4],
             ["run", "--managed-python", "--python", "3.12"]
         );
         assert!(arguments.windows(2).any(|pair| pair == ["--group", "music"]));
         assert!(arguments.windows(2).any(|pair| pair == ["--extra", "cuda"]));
+    }
+
+    #[test]
+    fn places_uv_offline_flag_before_application_arguments() {
+        let command = uv_run_command(Path::new("uv"), Path::new("python-source"), true);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments[0], "run");
+        assert_eq!(arguments[1], "--offline");
+        assert_eq!(arguments.last().map(String::as_str), Some("woosh-studio-api"));
     }
 
     #[test]

@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import json
-import os
-import queue
 import random
-import subprocess
-import sys
-from collections import deque
 from pathlib import Path
-from threading import RLock, Thread
+from threading import RLock
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -17,6 +11,7 @@ import soundfile as sf
 from .jobs import JobControl
 from .models import DEMUCS_MODEL_ID, HEARTMULA_MODEL_ID, ModelService
 from .projects import ProjectService, safe_name
+from .runtime import runtime_status
 from .schemas import (
     GeneratedAsset,
     JobStatus,
@@ -42,12 +37,14 @@ class MusicService:
         system: SystemService,
         coordinator: InferenceCoordinator,
         unload_woosh: Callable[[], None],
+        runtime=None,
     ):
         self.models = models
         self.projects = projects
         self.system = system
         self.coordinator = coordinator
         self.unload_woosh = unload_woosh
+        self.runtime = runtime
 
     def generation_worker(self, request: MusicGenerationRequest):
         def worker(job_id: str, update, control: JobControl) -> dict[str, Any]:
@@ -58,8 +55,8 @@ class MusicService:
             root = Path(request.project_path).expanduser().resolve()
             seeds = self._seeds(request)
             created_ids: list[str] = []
-            with self.coordinator.lock:
-                self.unload_woosh()
+            mixes = []
+            with self.runtime.sequence(control):
                 for index, seed in enumerate(seeds):
                     control.checkpoint()
                     group_id = str(uuid4())
@@ -72,38 +69,68 @@ class MusicService:
                         stage=f"准备音乐变体 {index + 1}/{len(seeds)}",
                         progress=base + 0.01 * scale,
                     )
-                    self._run_worker(
+                    worker_result = self._run_worker(
                         {
                             "command": "generate",
                             "model_path": str(self.models.music_path()),
                             "output_path": str(output),
                             "mode": request.mode,
-                            "lyrics": request.lyrics if request.mode == "lyrics" else "",
+                            "lyrics": request.lyrics
+                            if request.mode == "lyrics"
+                            else "",
                             "tags": request.tags,
                             "duration_seconds": request.duration_seconds,
+                            "performance_mode": request.settings.performance_mode,
                             "temperature": request.settings.temperature,
                             "top_k": request.settings.top_k,
                             "cfg_scale": request.settings.cfg_scale,
                             "seed": seed,
                             "device": self.system.capabilities().effective_device,
                             "memory_mode": self._memory_mode(),
+                            "runtime_version": runtime_status().version,
                         },
                         control,
                         lambda event: update(
                             status=JobStatus.RUNNING,
                             stage=event.get("stage", "生成音乐"),
                             message=event.get("message", ""),
-                            progress=base + float(event.get("progress", 0)) * 0.75 * scale,
+                            progress=(base + float(event.get("progress", 0)) * scale)
+                            * (0.75 if request.separate_stems else 0.98),
                         ),
                     )
                     control.checkpoint()
-                    manifest = self.projects.open(root)
+                    if not output.is_file():
+                        raise RuntimeError(f"音乐进程未在目标位置写入音频：{output}")
                     mix_asset = self._register_mix(
                         root, output, request, group_id, seed
                     )
-                    manifest.assets.append(mix_asset)
+                    if request.settings.performance_mode == "preview":
+                        mix_asset.tags.append("快速预览")
+                    mix_asset.music_metadata = {
+                        **(mix_asset.music_metadata or {}),
+                        "diagnostics": worker_result.get("diagnostics", {}),
+                        "memory_mode": self._memory_mode(),
+                        "performance_mode": request.settings.performance_mode,
+                    }
+                    self.projects.mutate(
+                        root, lambda manifest: manifest.assets.append(mix_asset)
+                    )
                     created_ids.append(mix_asset.id)
-                    if request.separate_stems:
+                    mixes.append(mix_asset)
+                    self.projects.mutate(
+                        root,
+                        lambda manifest: setattr(
+                            manifest.timeline,
+                            "duration_seconds",
+                            max(
+                                manifest.timeline.duration_seconds,
+                                mix_asset.duration_seconds,
+                            ),
+                        ),
+                    )
+                if request.separate_stems:
+                    for index, mix_asset in enumerate(mixes):
+                        control.checkpoint()
                         stem_assets = self._separate(
                             root,
                             mix_asset,
@@ -111,19 +138,16 @@ class MusicService:
                             lambda event: update(
                                 status=JobStatus.RENDERING,
                                 stage=event.get("stage", "分离四轨"),
-                                message=event.get("message", ""),
-                                progress=base
-                                + (0.76 + float(event.get("progress", 0)) * 0.21)
-                                * scale,
+                                progress=0.75
+                                + (index + float(event.get("progress", 0)))
+                                / len(mixes)
+                                * 0.23,
                             ),
                         )
-                        manifest.assets.extend(stem_assets)
+                        self.projects.mutate(
+                            root, lambda manifest: manifest.assets.extend(stem_assets)
+                        )
                         created_ids.extend(asset.id for asset in stem_assets)
-                    manifest.timeline.duration_seconds = max(
-                        manifest.timeline.duration_seconds,
-                        mix_asset.duration_seconds,
-                    )
-                    self.projects.save(root, manifest)
             update(status=JobStatus.RENDERING, stage="写入项目", progress=0.99)
             return {
                 "project_path": str(root),
@@ -148,13 +172,14 @@ class MusicService:
                 raise RuntimeError("模型尚未安装: Demucs-htdemucs")
             root = Path(request.project_path).expanduser().resolve()
             manifest = self.projects.open(root)
-            asset = next((item for item in manifest.assets if item.id == asset_id), None)
+            asset = next(
+                (item for item in manifest.assets if item.id == asset_id), None
+            )
             if asset is None:
                 raise RuntimeError("项目中不存在该音乐素材")
             if asset.kind != "music_mix":
                 raise RuntimeError("只能对完整音乐混音执行分轨")
-            with self.coordinator.lock:
-                self.unload_woosh()
+            with self.runtime.sequence(control):
                 stems = self._separate(
                     root,
                     asset,
@@ -166,15 +191,28 @@ class MusicService:
                         progress=float(event.get("progress", 0)) * 0.96,
                     ),
                 )
-            existing_roles = {
-                item.stem_role
-                for item in manifest.assets
-                if item.parent_asset_id == asset.id
+            new_stems = []
+
+            def attach(latest):
+                if not any(item.id == asset_id for item in latest.assets):
+                    raise RuntimeError(
+                        "原音乐素材在分轨过程中已被移除；生成文件保留在磁盘"
+                    )
+                existing_roles = {
+                    item.stem_role
+                    for item in latest.assets
+                    if item.parent_asset_id == asset.id
+                }
+                new_stems.extend(
+                    item for item in stems if item.stem_role not in existing_roles
+                )
+                latest.assets.extend(new_stems)
+
+            self.projects.mutate(root, attach)
+            return {
+                "project_path": str(root),
+                "asset_ids": [item.id for item in new_stems],
             }
-            new_stems = [item for item in stems if item.stem_role not in existing_roles]
-            manifest.assets.extend(new_stems)
-            self.projects.save(root, manifest)
-            return {"asset_ids": [item.id for item in new_stems]}
 
         return worker
 
@@ -208,6 +246,8 @@ class MusicService:
                 "top_k": request.settings.top_k,
                 "cfg_scale": request.settings.cfg_scale,
                 "stems_are_post_processed": request.separate_stems,
+                "runtime_version": runtime_status().version,
+                "offline": runtime_status().offline,
             },
         )
 
@@ -259,84 +299,9 @@ class MusicService:
         control: JobControl,
         on_progress: Callable[[dict[str, Any]], None],
     ) -> dict[str, Any]:
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "PYTHONUNBUFFERED": "1",
-                "HEARTMULA_MODEL_DIR": str(self.models.music_path()),
-                "TORCH_HOME": str(self.models.models_root / ".torch"),
-                "HF_HOME": str(self.models.models_root / ".huggingface"),
-                "MODELSCOPE_CACHE": str(self.models.models_root / ".modelscope"),
-            }
+        return self.runtime.run(
+            "woosh_studio.music_worker", payload, control, on_progress
         )
-        process = subprocess.Popen(
-            [sys.executable, "-m", "woosh_studio.music_worker"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=environment,
-            creationflags=0x08000000 if os.name == "nt" else 0,
-        )
-        assert process.stdin is not None
-        process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        process.stdin.close()
-        messages: queue.Queue[str | None] = queue.Queue()
-        stderr_tail: deque[str] = deque(maxlen=12)
-
-        def read_stdout() -> None:
-            assert process.stdout is not None
-            for line in process.stdout:
-                messages.put(line)
-            messages.put(None)
-
-        def read_stderr() -> None:
-            assert process.stderr is not None
-            for line in process.stderr:
-                stderr_tail.append(line.strip())
-
-        Thread(target=read_stdout, daemon=True).start()
-        Thread(target=read_stderr, daemon=True).start()
-        result: dict[str, Any] | None = None
-        error: str | None = None
-        try:
-            stream_closed = False
-            while process.poll() is None or not stream_closed:
-                control.checkpoint()
-                try:
-                    line = messages.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                if line is None:
-                    stream_closed = True
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    stderr_tail.append(line.strip())
-                    continue
-                if event.get("event") == "progress":
-                    on_progress(event)
-                elif event.get("event") == "result":
-                    result = event.get("result", {})
-                elif event.get("event") == "error":
-                    error = event.get("message", "音乐工作进程失败")
-            exit_code = process.wait()
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        if error:
-            raise RuntimeError(error)
-        if exit_code != 0 or result is None:
-            detail = " · ".join(item for item in stderr_tail if item)
-            raise RuntimeError(detail or f"音乐工作进程退出码 {exit_code}")
-        return result
 
     @staticmethod
     def _seeds(request: MusicGenerationRequest) -> list[int]:

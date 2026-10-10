@@ -11,6 +11,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { ModelRuntimePanel } from "../components/ModelRuntimePanel";
 import { useState } from "react";
 import { api } from "../api";
 import type { JobEvent, ModelDescriptor } from "../types";
@@ -24,14 +25,16 @@ interface ModelsViewProps {
 }
 
 const groups: Array<{
-  id: "text" | "music" | "separation" | "translation";
+  id: "text" | "music" | "speech" | "separation" | "translation" | "transcription";
   title: string;
   subtitle: string;
 }> = [
   { id: "text", title: "音效模型", subtitle: "Woosh 文本生成音效" },
   { id: "music", title: "音乐模型", subtitle: "HeartMuLa 与 HeartCodec" },
+  { id: "speech", title: "语音模型", subtitle: "Qwen3-TTS 角色配音" },
+  { id: "transcription", title: "语音转文字", subtitle: "参考录音自动识别 · 本地 Whisper" },
   { id: "separation", title: "分轨工具", subtitle: "音乐后处理模型" },
-  { id: "translation", title: "语言工具", subtitle: "本地中文提示词翻译" },
+  { id: "translation", title: "语言工具", subtitle: "内置多语种对白与提示词翻译" },
 ];
 
 export function ModelsView({
@@ -77,6 +80,7 @@ export function ModelsView({
           <div><span className="eyebrow">MODEL LIBRARY</span><h1>模型与权重</h1></div>
           <div className="storage-chip" title={modelRoot}><HardDrive size={15} /><span>共享模型库</span><strong>{modelRoot}</strong></div>
         </header>
+        <ModelRuntimePanel onError={onError}/>
         {groups.map((group) => {
           const entries = models.filter((model) => model.family === group.id);
           if (entries.length === 0) return null;
@@ -88,14 +92,14 @@ export function ModelsView({
               return <article className="model-row" key={model.id}>
                 <ModelIcon model={model} />
                 <div className="model-main">
-                  <div className="model-title"><strong>{model.name}</strong>{model.installed && <span className="installed-badge"><Check size={13} />已安装</span>}</div>
+                  <div className="model-title"><strong>{model.name}</strong>{model.installed && <span className="installed-badge"><Check size={13} />{model.bundled ? "内置 · 就绪" : "已安装"}</span>}</div>
                   <p>{model.description}</p>
-                  <div className="model-meta"><span>{model.release}</span><span>{model.license}</span>{size > 0 && <span>{formatBytes(size)} 下载</span>}<span>{sourceLabel(model.model_source)}</span></div>
+                  <div className="model-meta"><span>{model.release}</span><span>{model.license}</span>{model.bundled ? <span>随应用安装 · 无需下载</span> : size > 0 && <span>{formatBytes(size)} 下载</span>}<span>{sourceLabel(model.model_source)}</span></div>
                   {model.family !== "translation" && !model.installed && <label className="license-check"><input type="checkbox" checked={Boolean(accepted[model.id])} onChange={(event) => setAccepted((value) => ({ ...value, [model.id]: event.target.checked }))} /><span>我已阅读并接受 {model.license}</span></label>}
                   {job && <div className="model-progress"><div className="progress-track"><span style={{ width: `${job.progress * 100}%` }} /></div><span>{job.stage} · {Math.round(job.progress * 100)}%</span></div>}
                 </div>
                 <div className="model-actions">
-                  {model.installed ? <><span className="model-path" title={model.path || ""}>{model.path}</span><button className="icon-button" title="移除模型" onClick={async () => {
+                  {model.bundled ? <><span className="model-path" title={model.path || ""}>{model.path}</span><span className="muted">{model.installed ? "自动维护" : "启动时自动准备"}</span></> : model.installed ? <>{["speech","music","separation","transcription"].includes(model.family) && <button className="secondary-button" onClick={() => void api.preloadModel(model.id).then(onRefresh).catch(error => onError(String(error)))}>预加载</button>}<span className="model-path" title={model.path || ""}>{model.path}</span><button className="icon-button" title="移除模型" onClick={async () => {
                     try {
                       await api.removeModel(model.id);
                       onRefresh();
@@ -122,6 +126,7 @@ export function ModelsView({
 function ModelIcon({ model }: { model: ModelDescriptor }) {
   if (model.family === "translation") return <div className="model-icon translation"><Languages size={20} /></div>;
   if (model.family === "music") return <div className="model-icon music"><Music2 size={20} /></div>;
+  if (model.family === "speech") return <div className="model-icon music"><Music2 size={20} /></div>;
   if (model.family === "separation") return <div className="model-icon separation"><Scissors size={20} /></div>;
   return <div className="model-icon">{model.id.includes("DFlow") ? "DF" : "FL"}</div>;
 }

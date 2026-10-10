@@ -1,0 +1,50 @@
+{
+  "type": "woosh.script",
+  "version": 2,
+  "title": "星港守卫",
+  "source_locale": "zh-CN",
+  "target_locales": [
+    "zh-CN",
+    "en",
+    "ja"
+  ],
+  "glossary": [
+    {
+      "source": "星港",
+      "translations": {
+        "en": "Starport",
+        "ja": "スターポート"
+      },
+      "note": "统一地名"
+    }
+  ],
+  "voices": [
+    {
+      "id": "guard",
+      "name": "守卫",
+      "mode": "custom_voice",
+      "language": "Chinese",
+      "speaker": "Ryan",
+      "instruct": "沉稳，友好",
+      "reference_audio": null,
+      "reference_text": "",
+      "locale_overrides": {}
+    }
+  ],
+  "lines": [
+    {
+      "id": "guard-welcome",
+      "key": "chapter01.guard.welcome",
+      "scene_id": "chapter01",
+      "context": "守卫迎接刚到港的玩家",
+      "character": "守卫",
+      "voice_id": "guard",
+      "text": "欢迎来到星港。",
+      "source_language": "Chinese",
+      "language": "Chinese",
+      "enabled": true,
+      "instruct": "",
+      "localizations": {}
+    }
+  ]
+}

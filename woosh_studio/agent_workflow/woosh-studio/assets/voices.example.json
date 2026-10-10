@@ -1,0 +1,26 @@
+{
+  "type": "woosh.voices",
+  "version": 1,
+  "voices": [
+    {
+      "id": "narrator",
+      "name": "旁白",
+      "mode": "custom_voice",
+      "language": "Chinese",
+      "speaker": "Vivian",
+      "instruct": "温暖、清晰，语速适中，像在讲述一个真实的故事。",
+      "reference_audio": null,
+      "reference_text": ""
+    },
+    {
+      "id": "luo",
+      "name": "罗伦斯",
+      "mode": "custom_voice",
+      "language": "Chinese",
+      "speaker": "Dylan",
+      "instruct": "青年男性，冷静克制，句尾带一点犹豫。",
+      "reference_audio": null,
+      "reference_text": ""
+    }
+  ]
+}

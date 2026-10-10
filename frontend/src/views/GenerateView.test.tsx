@@ -83,6 +83,7 @@ describe("GenerateView", () => {
     const translate = vi.spyOn(api, "translate").mockResolvedValue({
       original: "重型机甲落地，金属冲击与短促液压声",
       translated: "a heavy mech landing with a metallic impact",
+      translation: { source_text: "重型机甲落地，金属冲击与短促液压声", source_language: "Chinese", target_language: "English", text: "a heavy mech landing with a metallic impact", model_id: "opus-mt-zh-en" },
     });
     const onQueued = vi.fn();
     render(
@@ -109,6 +110,17 @@ describe("GenerateView", () => {
     expect(getJob).toHaveBeenCalledWith("translation-job");
     expect(translate).toHaveBeenCalled();
     expect(onQueued).toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("uses bundled multilingual translation on a fresh machine without downloading OPUS", async () => {
+    const download = vi.spyOn(api, "downloadModel");
+    vi.spyOn(api, "translate").mockResolvedValue({ original: "重型机甲落地", translated: "A heavy mech lands.", translation: { source_text: "重型机甲落地", source_language: "Chinese", target_language: "English", text: "A heavy mech lands.", model_id: "m2m100-418M-int8" } });
+    const builtin = { ...translationModel, id: "m2m100-418M-int8", installed: true, bundled: true };
+    render(<GenerateView projectPath="E:/fresh.woosh" project={project} models={[dflow, builtin]} activeModel="Woosh-DFlow" onModelChange={vi.fn()} onProjectChange={vi.fn()} onQueued={vi.fn()} onError={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "转为英文" }));
+    await waitFor(() => expect(screen.getByLabelText("英文模型提示词")).toHaveValue("A heavy mech lands."));
+    expect(download).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
 
@@ -307,7 +319,7 @@ describe("GenerateView", () => {
       />,
     );
 
-    fireEvent.contextMenu(screen.getByRole("article", { name: "素材 context impact" }), {
+    fireEvent.contextMenu(screen.getByRole("article", { name: "context impact 音效卡片" }), {
       clientX: 120,
       clientY: 160,
     });

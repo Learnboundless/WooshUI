@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from collections.abc import Callable
 from threading import Event, RLock
 from typing import Any
@@ -11,6 +12,7 @@ from .storage import LibraryDatabase
 
 TERMINAL_STATUSES = {
     JobStatus.COMPLETED,
+    JobStatus.PARTIAL,
     JobStatus.FAILED,
     JobStatus.CANCELLED,
     JobStatus.INTERRUPTED,
@@ -29,7 +31,8 @@ class JobControl:
     def checkpoint(self) -> None:
         if self.cancelled.is_set():
             raise JobCancelled()
-        while self.paused.wait(0.2):
+        while self.paused.is_set():
+            self.cancelled.wait(0.1)
             if self.cancelled.is_set():
                 raise JobCancelled()
 
@@ -43,7 +46,7 @@ JobWorker = Callable[
 class JobManager:
     def __init__(self, database: LibraryDatabase):
         self.database = database
-        self._jobs: dict[str, JobEvent] = {}
+        self._jobs: dict[str, JobEvent] = {job.id: job for job in database.recent_jobs()}
         self._controls: dict[str, JobControl] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = RLock()
@@ -75,8 +78,8 @@ class JobManager:
             )
             self.update(
                 job_id,
-                status=JobStatus.COMPLETED,
-                stage="已完成",
+                status=JobStatus.PARTIAL if result.get("partial") else JobStatus.COMPLETED,
+                stage="部分完成 · 可重试失败项" if result.get("partial") else "已完成",
                 progress=1,
                 result=result,
             )
@@ -96,7 +99,7 @@ class JobManager:
                 job_id,
                 status=JobStatus.FAILED,
                 stage="失败",
-                error=StudioError(code=code, message=message),
+                error=StudioError(code=code, message=message, detail=f"失败阶段：{self.get(job_id).stage}\n{traceback.format_exc()[-12000:]}"),
             )
         except Exception as error:  # pragma: no cover - defensive boundary
             self.update(
@@ -106,9 +109,15 @@ class JobManager:
                 error=StudioError(
                     code=ErrorCode.INVALID_REQUEST,
                     message=str(error),
-                    detail=type(error).__name__,
+                    detail=f"失败阶段：{self.get(job_id).stage}\n{traceback.format_exc()[-12000:]}",
                 ),
             )
+
+    async def shutdown(self):
+        for control in self._controls.values():
+            control.cancelled.set()
+        if self._tasks:
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
     def update(self, job_id: str, **changes: Any) -> JobEvent:
         with self._lock:

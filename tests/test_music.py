@@ -57,7 +57,7 @@ def test_fake_music_generation_registers_mix_and_four_stems(
             json={"path": created["path"]},
         ).json()
 
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert {asset["kind"] for asset in manifest["assets"]} == {
         "music_mix",
         "stem",

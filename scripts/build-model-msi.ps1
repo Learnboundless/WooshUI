@@ -98,12 +98,13 @@ Set-WixAttributes $externalFeature @{
     Level = "1"
 }
 
-$modelDirectory = New-WixElement "Directory"
-Set-WixAttributes $modelDirectory @{
-    Id = "OfflineModelArchives"
-    Name = "offline-model-archives"
+# Reuse the core installer's directory, which contains mandatory translation resources.
+$modelDirectory = $document.SelectSingleNode("//w:Directory[@Name='offline-model-archives']", $namespaceManager)
+if ($null -eq $modelDirectory) {
+    $modelDirectory = New-WixElement "Directory"
+    Set-WixAttributes $modelDirectory @{ Id = "OfflineModelArchives"; Name = "offline-model-archives" }
+    $installDirectory.AppendChild($modelDirectory) | Out-Null
 }
-$installDirectory.AppendChild($modelDirectory) | Out-Null
 
 $components = @(
     @{

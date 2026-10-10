@@ -5,6 +5,7 @@ export default defineConfig({
   timeout: 30_000,
   use: {
     baseURL: "http://127.0.0.1:1420",
+    channel: process.env.PLAYWRIGHT_CHANNEL,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },

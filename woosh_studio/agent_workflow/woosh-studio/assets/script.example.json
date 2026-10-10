@@ -1,0 +1,56 @@
+{
+  "type": "woosh.script",
+  "version": 1,
+  "title": "雨夜来信",
+  "voices": [
+    {
+      "id": "narrator",
+      "name": "旁白",
+      "mode": "custom_voice",
+      "language": "Chinese",
+      "speaker": "Vivian",
+      "instruct": "温暖、清晰，语速适中，像在讲述一个真实的故事。",
+      "reference_audio": null,
+      "reference_text": ""
+    },
+    {
+      "id": "luo",
+      "name": "罗伦斯",
+      "mode": "custom_voice",
+      "language": "Chinese",
+      "speaker": "Dylan",
+      "instruct": "青年男性，冷静克制，句尾带一点犹豫。",
+      "reference_audio": null,
+      "reference_text": ""
+    }
+  ],
+  "lines": [
+    {
+      "id": "line-001",
+      "character": "旁白",
+      "voice_id": "narrator",
+      "text": "雨停之前，他终于等到了那封信。",
+      "language": "Chinese",
+      "instruct": "轻声铺陈，留一点悬念",
+      "enabled": true
+    },
+    {
+      "id": "line-002",
+      "character": "罗伦斯",
+      "voice_id": "luo",
+      "text": "这次，我想听你亲口告诉我。",
+      "language": "Chinese",
+      "instruct": "压低声音，认真而坚定",
+      "enabled": true
+    },
+    {
+      "id": "line-003",
+      "character": "旁白",
+      "voice_id": "narrator",
+      "text": "门外传来脚步声。他握紧了手中的信。",
+      "language": "Chinese",
+      "instruct": "稍放慢语速",
+      "enabled": true
+    }
+  ]
+}
